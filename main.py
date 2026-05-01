@@ -10,7 +10,6 @@ from threading import Thread
 # ================= CONFIG =================
 TOKEN = os.getenv("TOKEN")
 
-LOG_CHANNEL_ID = 1496478745538855146
 WELCOME_CHANNEL_ID = 1496478743873589448
 TICKET_CATEGORY_ID = 1496840441654677614
 VERIFY_ROLE_ID = 1499675598178750560
@@ -56,24 +55,12 @@ def get_admin_role(guild_id):
     r = cursor.fetchone()
     return r[0] if r else None
 
-def is_admin(member: discord.Member):
+def is_admin(member):
     if member.guild_permissions.administrator:
         return True
 
     role_id = get_admin_role(member.guild.id)
     return role_id and any(r.id == role_id for r in member.roles)
-
-# ================= ROLE SET =================
-@bot.tree.command(name="역할")
-async def set_role(interaction: discord.Interaction, role: discord.Role):
-
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message("❌ 서버 관리자만 가능", ephemeral=True)
-
-    cursor.execute("REPLACE INTO guild_config VALUES(?,?)", (interaction.guild.id, role.id))
-    conn.commit()
-
-    await interaction.response.send_message(embed=embed("설정 완료", f"관리자 역할: {role.mention}"))
 
 # ================= WARNING =================
 def get_warn(uid):
@@ -98,6 +85,7 @@ def remove_warn(uid):
 def clear_warn(uid):
     set_warn(uid, 0)
 
+# ================= PUNISH =================
 async def auto_punish(member, count):
     try:
         if count == 1:
@@ -142,12 +130,10 @@ class VerifyView(discord.ui.View):
     async def verify(self, i, b):
 
         role = i.guild.get_role(VERIFY_ROLE_ID)
-
         if not role:
             role = await i.guild.create_role(name="인증")
 
         await i.user.add_roles(role)
-
         await i.response.send_message(embed=embed("인증 완료"), ephemeral=True)
 
 # ================= TICKET =================
@@ -199,11 +185,6 @@ class PartyView(discord.ui.View):
             category=cat
         )
 
-        await vc.send(
-            embed=embed("🎮 파티 생성됨", f"{size}인 파티"),
-            view=PartyControlView(i.user.id)
-        )
-
         await i.response.send_message(embed=embed("파티 생성 완료"), ephemeral=True)
 
     @discord.ui.button(label="솔로", style=discord.ButtonStyle.primary)
@@ -226,7 +207,7 @@ class PartyView(discord.ui.View):
 async def on_ready():
     init_db()
     await bot.tree.sync()
-    print("🔥 FINAL BOT READY")
+    print("🔥 BOT READY")
 
 @bot.event
 async def on_member_join(member):
@@ -258,17 +239,6 @@ async def warn(i, user: discord.Member, reason: str="없음"):
 
     await i.response.send_message(embed=embed("경고", f"{user.mention}\n{reason}\n{c}회"))
 
-@bot.tree.command(name="경고감소")
-async def warn_minus(i, user: discord.Member):
-
-    if not is_admin(i.user):
-        return await i.response.send_message("❌ 권한 없음", ephemeral=True)
-
-    c = remove_warn(user.id)
-    await auto_punish(user, c)
-
-    await i.response.send_message(embed=embed("감소", f"{user.mention} → {c}"))
-
 @bot.tree.command(name="경고삭제")
 async def warn_clear(i, user: discord.Member):
 
@@ -278,7 +248,7 @@ async def warn_clear(i, user: discord.Member):
     clear_warn(user.id)
     await remove_punish(user)
 
-    await i.response.send_message(embed=embed("초기화 완료"))
+    await i.response.send_message(embed=embed("경고 초기화"))
 
 @bot.tree.command(name="인증패널")
 async def verify_panel(i):
@@ -291,6 +261,14 @@ async def ticket_panel(i):
 @bot.tree.command(name="파티패널")
 async def party_panel(i):
     await i.response.send_message(embed=embed("파티 시스템 🎮"), view=PartyView())
+
+@bot.tree.command(name="파티삭제")
+async def party_delete(i):
+
+    if not isinstance(i.channel, discord.VoiceChannel):
+        return await i.response.send_message("❌ 음성채널만 가능", ephemeral=True)
+
+    await i.channel.delete()
 
 # ================= RUN =================
 async def main():
