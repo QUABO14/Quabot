@@ -18,8 +18,11 @@ VERIFY_ROLE_ID = 1499675598178750560
 PARTY_CATEGORY_NAME = "🎮 파티"
 DB_PATH = "bot.db"
 
-SALARY_AMOUNT = 10000
+SALARY_AMOUNT = 50000
+SALARY_COOLDOWN = 15
 MAX_BET = 1000000
+
+salary_cooldowns = {}
 
 # ================= KEEP ALIVE FOR RENDER =================
 app = Flask(__name__)
@@ -248,7 +251,7 @@ class PartyView(discord.ui.View):
     async def five(self, i, b):
         await self.create(i, 5)
 
-# ================= 홀수 짝수 게임 =================
+# ================= SOLO 홀짝 =================
 class OddEvenView(discord.ui.View):
     def __init__(self, player_id, bet):
         super().__init__(timeout=30)
@@ -279,7 +282,6 @@ class OddEvenView(discord.ui.View):
             desc = (
                 f"나온 숫자: `{number}`\n"
                 f"결과: `{result}`\n"
-                f"베팅금: `{format_money(self.bet)}`\n"
                 f"획득금: `{format_money(win_amount)}`\n"
                 f"현재 잔액: `{format_money(new_balance)}`"
             )
@@ -304,142 +306,31 @@ class OddEvenView(discord.ui.View):
     async def even(self, i, b):
         await self.check_answer(i, "짝수")
 
-# ================= EVENTS =================
-@bot.event
-async def on_ready():
-    global bot_ready_synced
+# ================= 1VS1 홀짝 =================
+class DuelChoiceView(discord.ui.View):
+    def __init__(self, player1: discord.Member, player2: discord.Member, bet: int):
+        super().__init__(timeout=60)
+        self.player1 = player1
+        self.player2 = player2
+        self.bet = bet
+        self.choices = {}
+        self.finished = False
 
-    if bot_ready_synced:
-        return
+    async def choose(self, i: discord.Interaction, choice: str):
+        if i.user.id not in [self.player1.id, self.player2.id]:
+            return await i.response.send_message("❌ 대결 참가자만 선택할 수 있습니다.", ephemeral=True)
 
-    init_db()
+        if self.finished:
+            return await i.response.send_message("❌ 이미 끝난 대결입니다.", ephemeral=True)
 
-    bot.add_view(VerifyView())
-    bot.add_view(TicketView())
-    bot.add_view(CloseView())
-    bot.add_view(PartyView())
+        if i.user.id in self.choices:
+            return await i.response.send_message("❌ 이미 선택했습니다.", ephemeral=True)
 
-    synced = await bot.tree.sync()
-    bot_ready_synced = True
+        other_choices = list(self.choices.values())
+        if choice in other_choices:
+            return await i.response.send_message("❌ 상대가 이미 선택한 쪽입니다. 반대쪽을 선택하세요.", ephemeral=True)
 
-    print(f"🔥 BOT READY: {bot.user}")
-    print(f"✅ Slash commands synced: {len(synced)}")
+        self.choices[i.user.id] = choice
 
-@bot.event
-async def on_member_join(member):
-    ch = bot.get_channel(WELCOME_CHANNEL_ID)
-    if ch:
-        await ch.send(embed=embed("환영", member.mention))
-
-@bot.event
-async def on_message(m):
-    if m.author.bot:
-        return
-
-    lv, xp = add_xp(m.author.id)
-
-    if xp == 0:
-        await m.channel.send(embed=embed("레벨업", f"{m.author.mention} → LV {lv}"))
-
-    await bot.process_commands(m)
-
-# ================= COMMANDS =================
-@bot.tree.command(name="월급", description="월급 10,000원을 받습니다.")
-async def salary(i: discord.Interaction):
-    balance = add_money(i.user.id, SALARY_AMOUNT)
-
-    await i.response.send_message(
-        embed=embed(
-            "💰 월급 지급",
-            f"{i.user.mention}님이 `{format_money(SALARY_AMOUNT)}`을 받았습니다.\n"
-            f"현재 잔액: `{format_money(balance)}`",
-            0x57F287
-        )
-    )
-
-@bot.tree.command(name="잔액", description="현재 보유 금액을 확인합니다.")
-async def balance(i: discord.Interaction):
-    money = get_money(i.user.id)
-
-    await i.response.send_message(
-        embed=embed(
-            "💵 잔액",
-            f"{i.user.mention}님의 잔액: `{format_money(money)}`"
-        )
-    )
-
-@bot.tree.command(name="홀짝", description="홀수 짝수 게임에 베팅합니다.")
-async def odd_even_game(i: discord.Interaction, 금액: int):
-    if 금액 <= 0:
-        return await i.response.send_message("❌ 베팅 금액은 1원 이상이어야 합니다.", ephemeral=True)
-
-    if 금액 > MAX_BET:
-        return await i.response.send_message("❌ 최대 베팅 금액은 1,000,000원입니다.", ephemeral=True)
-
-    balance = get_money(i.user.id)
-    if balance < 금액:
-        return await i.response.send_message(
-            f"❌ 돈이 부족합니다.\n현재 잔액: `{format_money(balance)}`",
-            ephemeral=True
-        )
-
-    remove_money(i.user.id, 금액)
-
-    await i.response.send_message(
-        embed=embed(
-            "🎲 홀수 짝수 게임",
-            f"{i.user.mention}, 홀수 또는 짝수를 선택하세요!\n"
-            f"베팅금: `{format_money(금액)}`\n"
-            f"맞추면 `{format_money(금액 * 2)}` 지급, 틀리면 베팅금을 잃습니다."
-        ),
-        view=OddEvenView(i.user.id, 금액)
-    )
-
-@bot.tree.command(name="경고", description="유저에게 경고를 지급합니다.")
-async def warn(i: discord.Interaction, user: discord.Member, reason: str = "없음"):
-    if not is_admin(i.user):
-        return await i.response.send_message("❌ 권한 없음", ephemeral=True)
-
-    c = add_warn(user.id)
-    await auto_punish(user, c)
-
-    await i.response.send_message(embed=embed("경고", f"{user.mention}\n{reason}\n{c}회"))
-
-@bot.tree.command(name="경고삭제", description="유저의 경고를 초기화합니다.")
-async def warn_clear(i: discord.Interaction, user: discord.Member):
-    if not is_admin(i.user):
-        return await i.response.send_message("❌ 권한 없음", ephemeral=True)
-
-    clear_warn(user.id)
-    await remove_punish(user)
-
-    await i.response.send_message(embed=embed("경고 초기화"))
-
-@bot.tree.command(name="인증패널", description="인증 패널을 보냅니다.")
-async def verify_panel(i: discord.Interaction):
-    await i.response.send_message(embed=embed("인증"), view=VerifyView())
-
-@bot.tree.command(name="티켓패널", description="티켓 패널을 보냅니다.")
-async def ticket_panel(i: discord.Interaction):
-    await i.response.send_message(embed=embed("티켓"), view=TicketView())
-
-@bot.tree.command(name="파티패널", description="파티 생성 패널을 보냅니다.")
-async def party_panel(i: discord.Interaction):
-    await i.response.send_message(embed=embed("파티 시스템 🎮"), view=PartyView())
-
-@bot.tree.command(name="파티삭제", description="현재 음성 채널을 삭제합니다.")
-async def party_delete(i: discord.Interaction):
-    if not isinstance(i.channel, discord.VoiceChannel):
-        return await i.response.send_message("❌ 음성채널만 가능", ephemeral=True)
-
-    await i.channel.delete()
-
-# ================= RUN =================
-async def main():
-    if not TOKEN:
-        raise RuntimeError("TOKEN 환경변수가 설정되지 않았습니다.")
-
-    keep_alive()
-    await bot.start(TOKEN)
-
-asyncio.run(main())
+        if len(self.choices) < 2:
+            return await i.response.send_message(f"✅
