@@ -1,4 +1,3 @@
-from openai import OpenAI
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -8,7 +7,11 @@ import os
 import random
 from flask import Flask
 from threading import Thread
+from openai import OpenAI
 
+# ====================== AI 설정 ======================
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+user_memory = {}
 # ====================== 환경 설정 ======================
 TOKEN              = os.getenv("TOKEN")
 WELCOME_CHANNEL_ID = 1496478743873589448
@@ -55,6 +58,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 warnings: dict[int, int] = {}  # {user_id: count}
 
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+user_memory = {}
 # ====================== 로그 ======================
 async def send_log(embed: discord.Embed):
     ch = bot.get_channel(LOG_CHANNEL_ID)
@@ -377,11 +382,22 @@ async def on_app_command_error(interaction: discord.Interaction, error):
         await interaction.followup.send(embed=embed, ephemeral=True)
     else:
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ====================== 봇 시작 ======================
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    await bot.change_presence(
+        status=discord.Status.online,
+        activity=discord.Activity(type=discord.ActivityType.watching, name="서버 관리 중 👀")
+    )
+    print(f"✅ 봇 로그인: {bot.user} | 서버 수: {len(bot.guilds)}개")
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
+    # ================= AI =================
     if message.content.startswith("!ai"):
         user_id = message.author.id
         user_input = message.content[3:].strip()
@@ -394,19 +410,26 @@ async def on_message(message):
                 {"role": "system", "content": "너는 디스코드에서 친근하게 대화하는 AI야."}
             ]
 
-        user_memory[user_id].append({"role": "user", "content": user_input})
+        user_memory[user_id].append({
+            "role": "user",
+            "content": user_input
+        })
 
         try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=user_memory[user_id]
+            response = client.responses.create(
+                model="gpt-4.1-mini",
+                input=user_memory[user_id]
             )
 
-            reply = response.choices[0].message.content
-            user_memory[user_id].append({"role": "assistant", "content": reply})
+            reply = response.output_text
 
-            if len(user_memory[user_id]) > 20:
-                user_memory[user_id] = user_memory[user_id][-20:]
+            user_memory[user_id].append({
+                "role": "assistant",
+                "content": reply
+            })
+
+            # 메모리 제한
+            user_memory[user_id] = user_memory[user_id][-20:]
 
             embed = make_embed(
                 "🤖 AI 답변",
@@ -420,19 +443,8 @@ async def on_message(message):
         except Exception as e:
             await message.channel.send(f"❌ 오류: {e}")
 
+    # ⚠️ 이거 꼭 있어야 기존 명령어 작동
     await bot.process_commands(message)
-# ====================== 봇 시작 ======================
-@bot.event
-async def on_ready():
-    await bot.tree.sync()
-    await bot.change_presence(
-        status=discord.Status.online,
-        activity=discord.Activity(type=discord.ActivityType.watching, name="서버 관리 중 👀")
-    )
-    print(f"✅ 봇 로그인: {bot.user} | 서버 수: {len(bot.guilds)}개")
-
 # ====================== 실행 ======================
 keep_alive()
 bot.run(TOKEN)
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-user_memory = {}
