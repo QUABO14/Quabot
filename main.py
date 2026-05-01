@@ -4,6 +4,7 @@ import os
 import sqlite3
 import datetime
 import asyncio
+import random
 from flask import Flask
 from threading import Thread
 
@@ -128,7 +129,6 @@ def add_xp(uid):
 class VerifyView(discord.ui.View):
     @discord.ui.button(label="인증", style=discord.ButtonStyle.success)
     async def verify(self, i, b):
-
         role = i.guild.get_role(VERIFY_ROLE_ID)
         if not role:
             role = await i.guild.create_role(name="인증")
@@ -145,7 +145,6 @@ class CloseView(discord.ui.View):
 class TicketView(discord.ui.View):
     @discord.ui.button(label="티켓 생성", style=discord.ButtonStyle.primary)
     async def create(self, i, b):
-
         cat = discord.utils.get(i.guild.categories, id=TICKET_CATEGORY_ID)
 
         ch = await i.guild.create_text_channel(
@@ -154,7 +153,6 @@ class TicketView(discord.ui.View):
         )
 
         await ch.send(i.user.mention, view=CloseView())
-
         await i.response.send_message(embed=embed("티켓 생성"), ephemeral=True)
 
 # ================= PARTY =================
@@ -165,22 +163,18 @@ class PartyControlView(discord.ui.View):
 
     @discord.ui.button(label="파티 삭제", style=discord.ButtonStyle.danger)
     async def delete(self, i, b):
-
         if i.user.id != self.owner_id:
             return await i.response.send_message("❌ 파티장만 가능", ephemeral=True)
 
         await i.channel.delete()
 
-
 class PartyView(discord.ui.View):
-
     async def create(self, i, size):
-
         cat = discord.utils.get(i.guild.categories, name=PARTY_CATEGORY_NAME)
         if not cat:
             cat = await i.guild.create_category(PARTY_CATEGORY_NAME)
 
-        vc = await i.guild.create_voice_channel(
+        await i.guild.create_voice_channel(
             name=f"🎮 파티-{i.user.display_name}-{size}",
             category=cat
         )
@@ -188,19 +182,65 @@ class PartyView(discord.ui.View):
         await i.response.send_message(embed=embed("파티 생성 완료"), ephemeral=True)
 
     @discord.ui.button(label="솔로", style=discord.ButtonStyle.primary)
-    async def solo(self, i, b): await self.create(i, 1)
+    async def solo(self, i, b):
+        await self.create(i, 1)
 
     @discord.ui.button(label="듀오", style=discord.ButtonStyle.primary)
-    async def duo(self, i, b): await self.create(i, 2)
+    async def duo(self, i, b):
+        await self.create(i, 2)
 
     @discord.ui.button(label="트리오", style=discord.ButtonStyle.primary)
-    async def trio(self, i, b): await self.create(i, 3)
+    async def trio(self, i, b):
+        await self.create(i, 3)
 
     @discord.ui.button(label="스쿼드", style=discord.ButtonStyle.primary)
-    async def squad(self, i, b): await self.create(i, 4)
+    async def squad(self, i, b):
+        await self.create(i, 4)
 
     @discord.ui.button(label="5인", style=discord.ButtonStyle.primary)
-    async def five(self, i, b): await self.create(i, 5)
+    async def five(self, i, b):
+        await self.create(i, 5)
+
+# ================= 홀수 짝수 게임 =================
+class OddEvenView(discord.ui.View):
+    def __init__(self, player_id):
+        super().__init__(timeout=30)
+        self.player_id = player_id
+        self.finished = False
+
+    async def check_answer(self, i, choice):
+        if i.user.id != self.player_id:
+            return await i.response.send_message("❌ 게임을 시작한 사람만 누를 수 있습니다.", ephemeral=True)
+
+        if self.finished:
+            return await i.response.send_message("❌ 이미 끝난 게임입니다.", ephemeral=True)
+
+        self.finished = True
+
+        number = random.randint(1, 100)
+        result = "홀수" if number % 2 == 1 else "짝수"
+
+        for item in self.children:
+            item.disabled = True
+
+        if choice == result:
+            title = "🎉 정답"
+            desc = f"나온 숫자: `{number}`\n결과: `{result}`\n{i.user.mention} 승리!"
+            color = 0x57F287
+        else:
+            title = "💥 실패"
+            desc = f"나온 숫자: `{number}`\n결과: `{result}`\n{i.user.mention} 패배!"
+            color = 0xED4245
+
+        await i.response.edit_message(embed=embed(title, desc, color), view=self)
+
+    @discord.ui.button(label="홀수", style=discord.ButtonStyle.primary)
+    async def odd(self, i, b):
+        await self.check_answer(i, "홀수")
+
+    @discord.ui.button(label="짝수", style=discord.ButtonStyle.success)
+    async def even(self, i, b):
+        await self.check_answer(i, "짝수")
 
 # ================= EVENTS =================
 @bot.event
@@ -229,8 +269,7 @@ async def on_message(m):
 
 # ================= COMMANDS =================
 @bot.tree.command(name="경고")
-async def warn(i, user: discord.Member, reason: str="없음"):
-
+async def warn(i, user: discord.Member, reason: str = "없음"):
     if not is_admin(i.user):
         return await i.response.send_message("❌ 권한 없음", ephemeral=True)
 
@@ -241,7 +280,6 @@ async def warn(i, user: discord.Member, reason: str="없음"):
 
 @bot.tree.command(name="경고삭제")
 async def warn_clear(i, user: discord.Member):
-
     if not is_admin(i.user):
         return await i.response.send_message("❌ 권한 없음", ephemeral=True)
 
@@ -262,9 +300,15 @@ async def ticket_panel(i):
 async def party_panel(i):
     await i.response.send_message(embed=embed("파티 시스템 🎮"), view=PartyView())
 
+@bot.tree.command(name="홀짝")
+async def odd_even_game(i):
+    await i.response.send_message(
+        embed=embed("🎲 홀수 짝수 게임", f"{i.user.mention}, 홀수 또는 짝수를 선택하세요!"),
+        view=OddEvenView(i.user.id)
+    )
+
 @bot.tree.command(name="파티삭제")
 async def party_delete(i):
-
     if not isinstance(i.channel, discord.VoiceChannel):
         return await i.response.send_message("❌ 음성채널만 가능", ephemeral=True)
 
