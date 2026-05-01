@@ -18,6 +18,9 @@ VERIFY_ROLE_ID = 1499675598178750560
 PARTY_CATEGORY_NAME = "🎮 파티"
 DB_PATH = "bot.db"
 
+SALARY_AMOUNT = 10000
+MAX_BET = 1000000
+
 # ================= KEEP ALIVE FOR RENDER =================
 app = Flask(__name__)
 
@@ -56,6 +59,12 @@ def init_db():
             admin_role_id INTEGER
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS money (
+            user_id INTEGER PRIMARY KEY,
+            balance INTEGER
+        )
+    """)
     conn.commit()
 
 # ================= BOT =================
@@ -68,6 +77,30 @@ def embed(title, desc="", color=0x5865F2):
     e = discord.Embed(title=title, description=desc, color=color)
     e.timestamp = datetime.datetime.utcnow()
     return e
+
+# ================= MONEY =================
+def format_money(amount):
+    return f"{amount:,}원"
+
+def get_money(uid):
+    cursor.execute("SELECT balance FROM money WHERE user_id=?", (uid,))
+    r = cursor.fetchone()
+    return r[0] if r else 0
+
+def set_money(uid, amount):
+    amount = max(amount, 0)
+    cursor.execute("REPLACE INTO money VALUES(?,?)", (uid, amount))
+    conn.commit()
+
+def add_money(uid, amount):
+    balance = get_money(uid) + amount
+    set_money(uid, balance)
+    return balance
+
+def remove_money(uid, amount):
+    balance = max(get_money(uid) - amount, 0)
+    set_money(uid, balance)
+    return balance
 
 # ================= ADMIN ROLE =================
 def get_admin_role(guild_id):
@@ -217,9 +250,10 @@ class PartyView(discord.ui.View):
 
 # ================= 홀수 짝수 게임 =================
 class OddEvenView(discord.ui.View):
-    def __init__(self, player_id):
+    def __init__(self, player_id, bet):
         super().__init__(timeout=30)
         self.player_id = player_id
+        self.bet = bet
         self.finished = False
 
     async def check_answer(self, i: discord.Interaction, choice: str):
@@ -238,12 +272,26 @@ class OddEvenView(discord.ui.View):
             item.disabled = True
 
         if choice == result:
+            win_amount = self.bet * 2
+            new_balance = add_money(i.user.id, win_amount)
+
             title = "🎉 정답"
-            desc = f"나온 숫자: `{number}`\n결과: `{result}`\n{i.user.mention} 승리!"
+            desc = (
+                f"나온 숫자: `{number}`\n"
+                f"결과: `{result}`\n"
+                f"베팅금: `{format_money(self.bet)}`\n"
+                f"획득금: `{format_money(win_amount)}`\n"
+                f"현재 잔액: `{format_money(new_balance)}`"
+            )
             color = 0x57F287
         else:
             title = "💥 실패"
-            desc = f"나온 숫자: `{number}`\n결과: `{result}`\n{i.user.mention} 패배!"
+            desc = (
+                f"나온 숫자: `{number}`\n"
+                f"결과: `{result}`\n"
+                f"잃은 금액: `{format_money(self.bet)}`\n"
+                f"현재 잔액: `{format_money(get_money(i.user.id))}`"
+            )
             color = 0xED4245
 
         await i.response.edit_message(embed=embed(title, desc, color), view=self)
@@ -296,6 +344,57 @@ async def on_message(m):
     await bot.process_commands(m)
 
 # ================= COMMANDS =================
+@bot.tree.command(name="월급", description="월급 10,000원을 받습니다.")
+async def salary(i: discord.Interaction):
+    balance = add_money(i.user.id, SALARY_AMOUNT)
+
+    await i.response.send_message(
+        embed=embed(
+            "💰 월급 지급",
+            f"{i.user.mention}님이 `{format_money(SALARY_AMOUNT)}`을 받았습니다.\n"
+            f"현재 잔액: `{format_money(balance)}`",
+            0x57F287
+        )
+    )
+
+@bot.tree.command(name="잔액", description="현재 보유 금액을 확인합니다.")
+async def balance(i: discord.Interaction):
+    money = get_money(i.user.id)
+
+    await i.response.send_message(
+        embed=embed(
+            "💵 잔액",
+            f"{i.user.mention}님의 잔액: `{format_money(money)}`"
+        )
+    )
+
+@bot.tree.command(name="홀짝", description="홀수 짝수 게임에 베팅합니다.")
+async def odd_even_game(i: discord.Interaction, 금액: int):
+    if 금액 <= 0:
+        return await i.response.send_message("❌ 베팅 금액은 1원 이상이어야 합니다.", ephemeral=True)
+
+    if 금액 > MAX_BET:
+        return await i.response.send_message("❌ 최대 베팅 금액은 1,000,000원입니다.", ephemeral=True)
+
+    balance = get_money(i.user.id)
+    if balance < 금액:
+        return await i.response.send_message(
+            f"❌ 돈이 부족합니다.\n현재 잔액: `{format_money(balance)}`",
+            ephemeral=True
+        )
+
+    remove_money(i.user.id, 금액)
+
+    await i.response.send_message(
+        embed=embed(
+            "🎲 홀수 짝수 게임",
+            f"{i.user.mention}, 홀수 또는 짝수를 선택하세요!\n"
+            f"베팅금: `{format_money(금액)}`\n"
+            f"맞추면 `{format_money(금액 * 2)}` 지급, 틀리면 베팅금을 잃습니다."
+        ),
+        view=OddEvenView(i.user.id, 금액)
+    )
+
 @bot.tree.command(name="경고", description="유저에게 경고를 지급합니다.")
 async def warn(i: discord.Interaction, user: discord.Member, reason: str = "없음"):
     if not is_admin(i.user):
@@ -327,13 +426,6 @@ async def ticket_panel(i: discord.Interaction):
 @bot.tree.command(name="파티패널", description="파티 생성 패널을 보냅니다.")
 async def party_panel(i: discord.Interaction):
     await i.response.send_message(embed=embed("파티 시스템 🎮"), view=PartyView())
-
-@bot.tree.command(name="홀짝", description="홀수 짝수 게임을 시작합니다.")
-async def odd_even_game(i: discord.Interaction):
-    await i.response.send_message(
-        embed=embed("🎲 홀수 짝수 게임", f"{i.user.mention}, 홀수 또는 짝수를 선택하세요!"),
-        view=OddEvenView(i.user.id)
-    )
 
 @bot.tree.command(name="파티삭제", description="현재 음성 채널을 삭제합니다.")
 async def party_delete(i: discord.Interaction):
