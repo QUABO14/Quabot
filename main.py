@@ -12,19 +12,19 @@ TOKEN = os.getenv("TOKEN")
 
 LOG_CHANNEL_ID = 1496478745538855146
 WELCOME_CHANNEL_ID = 1496478743873589448
-VERIFY_ROLE_ID = 1496479066075697234
 TICKET_CATEGORY_ID = 1496840441654677614
 
-# ================= WEB (Render 유지용) =================
+BOT_ADMIN_ROLE_ID = 1499675598178750561  # 🔴 봇 관리자 역할
+
+# ================= WEB (Render keep alive) =================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "OK - BOT RUNNING"
+    return "BOT ONLINE"
 
 def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 def keep_alive():
     Thread(target=run_web, daemon=True).start()
@@ -35,19 +35,16 @@ cursor = conn.cursor()
 
 def init_db():
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS warnings (
-        user_id INTEGER PRIMARY KEY,
-        count INTEGER
+    CREATE TABLE IF NOT EXISTS guild_config (
+        guild_id INTEGER PRIMARY KEY,
+        staff_role_id INTEGER
     )
     """)
 
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS warn_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        mod_id INTEGER,
-        reason TEXT,
-        time TEXT
+    CREATE TABLE IF NOT EXISTS warnings (
+        user_id INTEGER PRIMARY KEY,
+        count INTEGER
     )
     """)
 
@@ -70,31 +67,45 @@ def embed(title, desc="", color=0x5865F2):
     e.timestamp = datetime.datetime.utcnow()
     return e
 
-# ================= PERMISSION (멀티 서버 대응) =================
+# ================= ROLE SYSTEM =================
+async def get_staff_role(guild: discord.Guild):
+    cursor.execute("SELECT staff_role_id FROM guild_config WHERE guild_id=?", (guild.id,))
+    r = cursor.fetchone()
+
+    if r:
+        role = guild.get_role(r[0])
+        if role:
+            return role
+
+    role = discord.utils.get(guild.roles, name="운영진")
+
+    if role is None:
+        role = await guild.create_role(name="운영진")
+
+    cursor.execute("REPLACE INTO guild_config VALUES (?,?)", (guild.id, role.id))
+    conn.commit()
+
+    return role
+
 def is_staff(member: discord.Member):
-    STAFF_NAMES = ["운영진", "Admin", "Staff", "관리자"]
+    cursor.execute("SELECT staff_role_id FROM guild_config WHERE guild_id=?", (member.guild.id,))
+    r = cursor.fetchone()
+    if not r:
+        return False
+    return any(role.id == r[0] for role in member.roles)
 
-    return any(
-        r.name in STAFF_NAMES
-        for r in member.roles
-    )
+def is_bot_admin(member: discord.Member):
+    return any(role.id == BOT_ADMIN_ROLE_ID for role in member.roles)
 
-# ================= WARNING SYSTEM =================
+# ================= WARNING =================
 def get_warn(uid):
     cursor.execute("SELECT count FROM warnings WHERE user_id=?", (uid,))
     r = cursor.fetchone()
     return r[0] if r else 0
 
-def add_warn(uid, mod_id, reason):
+def add_warn(uid):
     c = get_warn(uid) + 1
-
     cursor.execute("REPLACE INTO warnings VALUES(?,?)", (uid, c))
-
-    cursor.execute("""
-        INSERT INTO warn_logs (user_id, mod_id, reason, time)
-        VALUES (?,?,?,?)
-    """, (uid, mod_id, reason, datetime.datetime.utcnow().isoformat()))
-
     conn.commit()
     return c
 
@@ -140,8 +151,9 @@ class TicketView(discord.ui.View):
 class VerifyView(discord.ui.View):
     @discord.ui.button(label="인증", style=discord.ButtonStyle.success)
     async def verify(self, i, b):
-        role = i.guild.get_role(VERIFY_ROLE_ID)
-        await i.user.add_roles(role)
+        role = discord.utils.get(i.guild.roles, name="운영진")
+        if role:
+            await i.user.add_roles(role)
         await i.response.send_message("인증 완료", ephemeral=True)
 
 # ================= EVENTS =================
@@ -149,7 +161,7 @@ class VerifyView(discord.ui.View):
 async def on_ready():
     init_db()
     await bot.tree.sync()
-    print("🔥 FULL OPERATING BOT READY")
+    print("🔥 BOT READY (STABLE VERSION)")
 
 @bot.event
 async def on_member_join(m):
@@ -168,80 +180,47 @@ async def on_message(m):
 
     await bot.process_commands(m)
 
-# ================= PREFIX COMMANDS (호환용) =================
-@bot.command()
-async def 경고(ctx, user: discord.Member, *, reason="없음"):
-    if not is_staff(ctx.author):
-        return await ctx.reply("❌ 권한 없음")
+# ================= SETUP =================
+@bot.tree.command(name="setup")
+async def setup(interaction: discord.Interaction):
+    if not is_bot_admin(interaction.user):
+        return await interaction.response.send_message("❌ 봇 관리자만 가능", ephemeral=True)
 
-    c = add_warn(user.id, ctx.author.id, reason)
-    await ctx.send(embed=embed("경고", f"{user.mention} | {c}회 | {reason}"))
+    role = await get_staff_role(interaction.guild)
 
-@bot.command()
-async def 경고확인(ctx, user: discord.Member):
-    c = get_warn(user.id)
-    await ctx.send(embed=embed("경고 확인", f"{user.mention} | {c}회"))
+    await interaction.response.send_message(
+        f"✅ 설정 완료\n운영진 역할: {role.mention}",
+        ephemeral=True
+    )
 
-@bot.command()
-async def 경고감소(ctx, user: discord.Member):
-    if not is_staff(ctx.author):
-        return await ctx.reply("❌ 권한 없음")
-
-    c = remove_warn(user.id)
-    await ctx.send(embed=embed("경고 감소", f"{user.mention} | {c}회"))
-
-@bot.command()
-async def 인증패널(ctx):
-    if not is_staff(ctx.author):
-        return await ctx.reply("❌ 권한 없음")
-
-    await ctx.send(embed=embed("인증"), view=VerifyView())
-
-@bot.command()
-async def 티켓패널(ctx):
-    await ctx.send(embed=embed("티켓"), view=TicketView())
-
-# ================= SLASH COMMANDS =================
+# ================= COMMANDS =================
 @bot.tree.command(name="경고")
-async def slash_warn(interaction: discord.Interaction, user: discord.Member, reason: str = "없음"):
+async def warn(interaction: discord.Interaction, user: discord.Member):
     if not is_staff(interaction.user):
         return await interaction.response.send_message("❌ 권한 없음", ephemeral=True)
 
-    c = add_warn(user.id, interaction.user.id, reason)
-
-    await interaction.response.send_message(
-        embed=embed("경고", f"{user.mention} | {c}회 | {reason}")
-    )
+    c = add_warn(user.id)
+    await interaction.response.send_message(embed=embed("경고", f"{user.mention} | {c}회"))
 
 @bot.tree.command(name="경고확인")
-async def slash_check(interaction: discord.Interaction, user: discord.Member):
-    c = get_warn(user.id)
-
-    await interaction.response.send_message(
-        embed=embed("경고 확인", f"{user.mention} | {c}회")
-    )
+async def check(interaction: discord.Interaction, user: discord.Member):
+    await interaction.response.send_message(embed=embed("경고", f"{user.mention} | {get_warn(user.id)}회"))
 
 @bot.tree.command(name="경고감소")
-async def slash_minus(interaction: discord.Interaction, user: discord.Member):
+async def minus(interaction: discord.Interaction, user: discord.Member):
     if not is_staff(interaction.user):
         return await interaction.response.send_message("❌ 권한 없음", ephemeral=True)
 
     c = remove_warn(user.id)
-
-    await interaction.response.send_message(
-        embed=embed("경고 감소", f"{user.mention} | {c}회")
-    )
-
-@bot.tree.command(name="인증패널")
-async def slash_verify(interaction: discord.Interaction):
-    if not is_staff(interaction.user):
-        return await interaction.response.send_message("❌ 권한 없음", ephemeral=True)
-
-    await interaction.response.send_message("인증", view=VerifyView())
+    await interaction.response.send_message(embed=embed("감소", f"{user.mention} | {c}회"))
 
 @bot.tree.command(name="티켓패널")
-async def slash_ticket(interaction: discord.Interaction):
+async def ticket(interaction: discord.Interaction):
     await interaction.response.send_message("티켓", view=TicketView())
+
+@bot.tree.command(name="인증패널")
+async def verify_panel(interaction: discord.Interaction):
+    await interaction.response.send_message("인증", view=VerifyView())
 
 # ================= RUN =================
 async def main():
