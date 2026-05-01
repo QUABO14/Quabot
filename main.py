@@ -7,8 +7,14 @@ import asyncio
 import random
 from flask import Flask
 from threading import Thread
+from google import genai
+from google.genai import types
 
 TOKEN = os.getenv("TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 WELCOME_CHANNEL_ID = 1496478743873589448
 TICKET_CATEGORY_ID = 1496840441654677614
@@ -599,6 +605,38 @@ async def on_message(m):
         await m.channel.send(embed=embed("레벨업", f"{m.author.mention} → LV {lv}"))
 
     await bot.process_commands(m)
+
+@bot.tree.command(name="ai", description="AI에게 질문합니다.")
+async def ai_chat(i: discord.Interaction, 질문: str):
+    if not GEMINI_API_KEY or gemini_client is None:
+        return await i.response.send_message(
+            "❌ GEMINI_API_KEY가 설정되지 않았습니다.",
+            ephemeral=True
+        )
+
+    await i.response.defer(thinking=True)
+
+    try:
+        response = await asyncio.to_thread(
+            gemini_client.models.generate_content,
+            model=GEMINI_MODEL,
+            contents=질문,
+            config=types.GenerateContentConfig(
+                system_instruction="너는 디스코드 서버에서 사용자를 도와주는 친절한 한국어 AI야. 답변은 너무 길지 않게 해.",
+                max_output_tokens=800,
+                temperature=0.7
+            )
+        )
+
+        answer = response.text.strip() if response.text else "답변을 생성하지 못했습니다."
+
+        if len(answer) > 1900:
+            answer = answer[:1900] + "\n\n...답변이 너무 길어서 잘렸습니다."
+
+        await i.followup.send(answer)
+
+    except Exception as e:
+        await i.followup.send(f"❌ AI 오류 발생: `{e}`")
 
 @bot.tree.command(name="월급", description="월급 100,000원을 받습니다. 5초 쿨타임이 있습니다.")
 async def salary(i: discord.Interaction):
