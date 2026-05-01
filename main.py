@@ -16,15 +16,15 @@ VERIFY_ROLE_ID = 1496479066075697234
 TICKET_CATEGORY_ID = 1496840441654677614
 STAFF_ROLE_ID = 1499592576712577138
 
-# ================= Flask (UptimeRobot 핵심) =================
+# ================= WEB (Render 필수) =================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "OK - Bot Alive"
+    return "OK - BOT ONLINE"
 
 def run_web():
-    port = int(os.environ.get("PORT", 10000))  # 🔥 Render 필수
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
 def keep_alive():
@@ -35,39 +35,69 @@ conn = sqlite3.connect("bot.db", check_same_thread=False)
 cursor = conn.cursor()
 
 def init_db():
-    cursor.execute("CREATE TABLE IF NOT EXISTS warnings (user_id INTEGER PRIMARY KEY, count INTEGER)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS levels (user_id INTEGER PRIMARY KEY, xp INTEGER, level INTEGER)")
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS warnings (
+        user_id INTEGER PRIMARY KEY,
+        count INTEGER
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS warn_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        mod_id INTEGER,
+        reason TEXT,
+        time TEXT
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS levels (
+        user_id INTEGER PRIMARY KEY,
+        xp INTEGER,
+        level INTEGER
+    )
+    """)
+
     conn.commit()
 
-# ================= Bot =================
+# ================= BOT =================
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ================= Utils =================
+# ================= UTIL =================
 def embed(title, desc="", color=0x5865F2):
     e = discord.Embed(title=title, description=desc, color=color)
     e.timestamp = datetime.datetime.utcnow()
     return e
 
-async def safe_send(channel, **kwargs):
+async def safe_send(ch, **kwargs):
     try:
-        await channel.send(**kwargs)
+        await ch.send(**kwargs)
     except:
         pass
 
-# ================= 권한 =================
+# ================= PERMISSION =================
 def is_staff(member):
     return any(r.id == STAFF_ROLE_ID for r in member.roles)
 
-# ================= 경고 =================
+# ================= WARNING SYSTEM =================
 def get_warn(uid):
     cursor.execute("SELECT count FROM warnings WHERE user_id=?", (uid,))
     r = cursor.fetchone()
     return r[0] if r else 0
 
-def add_warn(uid):
+def add_warn(uid, mod_id, reason):
     c = get_warn(uid) + 1
+
     cursor.execute("REPLACE INTO warnings VALUES(?,?)", (uid, c))
+
+    cursor.execute("""
+        INSERT INTO warn_logs (user_id, mod_id, reason, time)
+        VALUES (?,?,?,?)
+    """, (uid, mod_id, reason, datetime.datetime.utcnow().isoformat()))
+
     conn.commit()
     return c
 
@@ -77,22 +107,7 @@ def remove_warn(uid):
     conn.commit()
     return c
 
-async def auto_punish(member, c):
-    try:
-        if c == 1:
-            await member.timeout(datetime.timedelta(minutes=10))
-        elif c == 2:
-            await member.timeout(datetime.timedelta(hours=1))
-        elif c == 3:
-            await member.timeout(datetime.timedelta(days=1))
-        elif c == 4:
-            await member.kick()
-        elif c >= 5:
-            await member.ban()
-    except:
-        pass
-
-# ================= 레벨 =================
+# ================= LEVEL =================
 def add_xp(uid):
     cursor.execute("SELECT xp,level FROM levels WHERE user_id=?", (uid,))
     r = cursor.fetchone()
@@ -108,7 +123,7 @@ def add_xp(uid):
     conn.commit()
     return lv, xp
 
-# ================= 티켓 =================
+# ================= TICKET =================
 class CloseView(discord.ui.View):
     @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger)
     async def close(self, i, b):
@@ -124,7 +139,7 @@ class TicketView(discord.ui.View):
         await ch.send(i.user.mention, view=CloseView())
         await i.response.send_message("생성 완료", ephemeral=True)
 
-# ================= 인증 =================
+# ================= VERIFY =================
 class VerifyView(discord.ui.View):
     @discord.ui.button(label="인증", style=discord.ButtonStyle.success)
     async def verify(self, i, b):
@@ -132,12 +147,12 @@ class VerifyView(discord.ui.View):
         await i.user.add_roles(role)
         await i.response.send_message("인증 완료", ephemeral=True)
 
-# ================= 이벤트 =================
+# ================= EVENTS =================
 @bot.event
 async def on_ready():
     init_db()
     await bot.tree.sync()
-    print("🔥 BOT READY - SERVICE MODE")
+    print("🔥 FULL SERVICE BOT READY")
 
 @bot.event
 async def on_member_join(m):
@@ -159,41 +174,58 @@ async def on_message(m):
 
     await bot.process_commands(m)
 
-# ================= 명령어 =================
-@bot.command()
-async def 인증패널(ctx):
-    if not is_staff(ctx.author):
-        return await ctx.reply("❌ 권한 없음")
-    await ctx.send(embed=embed("인증"), view=VerifyView())
+# ================= COMMANDS =================
 
+# ✔ 경고 추가
 @bot.command()
-async def 티켓패널(ctx):
-    await ctx.send(embed=embed("티켓"), view=TicketView())
-
-@bot.command()
-async def 경고(ctx, user: discord.Member, 이유="없음"):
+async def 경고(ctx, user: discord.Member, *, reason="없음"):
     if not is_staff(ctx.author):
         return await ctx.reply("❌ 권한 없음")
 
-    c = add_warn(user.id)
-    await auto_punish(user, c)
+    c = add_warn(user.id, ctx.author.id, reason)
 
-    await ctx.send(embed=embed("경고", f"{user.mention} {c}회 | {이유}"))
+    await ctx.send(embed=embed(
+        "경고 추가",
+        f"{user.mention} | {c}회 | {reason}"
+    ))
 
+# ✔ 경고 감소
 @bot.command()
-async def 경고취소(ctx, user: discord.Member):
+async def 경고감소(ctx, user: discord.Member):
     if not is_staff(ctx.author):
         return await ctx.reply("❌ 권한 없음")
 
     c = remove_warn(user.id)
-    await ctx.send(embed=embed("경고 감소", f"{user.mention} {c}회"))
 
+    await ctx.send(embed=embed(
+        "경고 감소",
+        f"{user.mention} | {c}회"
+    ))
+
+# ✔ 경고 확인
 @bot.command()
 async def 경고확인(ctx, user: discord.Member):
     c = get_warn(user.id)
-    await ctx.send(embed=embed("경고 확인", f"{user.mention} {c}회"))
 
-# ================= 실행 =================
+    await ctx.send(embed=embed(
+        "경고 확인",
+        f"{user.mention} | {c}회"
+    ))
+
+# ✔ 인증패널
+@bot.command()
+async def 인증패널(ctx):
+    if not is_staff(ctx.author):
+        return await ctx.reply("❌ 권한 없음")
+
+    await ctx.send(embed=embed("인증"), view=VerifyView())
+
+# ✔ 티켓패널
+@bot.command()
+async def 티켓패널(ctx):
+    await ctx.send(embed=embed("티켓"), view=TicketView())
+
+# ================= RUN =================
 async def main():
     keep_alive()
     await bot.start(TOKEN)
