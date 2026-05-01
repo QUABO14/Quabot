@@ -34,13 +34,6 @@ cursor = conn.cursor()
 
 def init_db():
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS guild_config (
-        guild_id INTEGER PRIMARY KEY,
-        admin_role_id INTEGER
-    )
-    """)
-
-    cursor.execute("""
     CREATE TABLE IF NOT EXISTS warnings (
         user_id INTEGER PRIMARY KEY,
         count INTEGER
@@ -55,24 +48,28 @@ def init_db():
     )
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS guild_config (
+        guild_id INTEGER PRIMARY KEY,
+        admin_role_id INTEGER
+    )
+    """)
+
     conn.commit()
 
 # ================= BOT =================
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ================= UTIL =================
+# ================= EMBED =================
 def embed(title, desc="", color=0x5865F2):
     e = discord.Embed(title=title, description=desc, color=color)
     e.timestamp = datetime.datetime.utcnow()
     return e
 
 # ================= SERVER ROLE SYSTEM =================
-def get_admin_role_id(guild_id):
-    cursor.execute(
-        "SELECT admin_role_id FROM guild_config WHERE guild_id=?",
-        (guild_id,)
-    )
+def get_admin_role(guild_id):
+    cursor.execute("SELECT admin_role_id FROM guild_config WHERE guild_id=?", (guild_id,))
     r = cursor.fetchone()
     return r[0] if r else None
 
@@ -83,26 +80,17 @@ def is_admin(member: discord.Member):
     if member.guild_permissions.administrator:
         return True
 
-    role_id = get_admin_role_id(member.guild.id)
-    if not role_id:
-        return False
+    role_id = get_admin_role(member.guild.id)
+    return role_id and any(r.id == role_id for r in member.roles)
 
-    return any(r.id == role_id for r in member.roles)
-
-# ================= ROLE SET COMMAND =================
+# ================= ROLE SET =================
 @bot.tree.command(name="역할", description="봇 관리자 역할 설정")
 async def set_role(interaction: discord.Interaction, role: discord.Role):
 
     if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message(
-            "❌ 서버 관리자만 설정 가능",
-            ephemeral=True
-        )
+        return await interaction.response.send_message("❌ 서버 관리자만 가능", ephemeral=True)
 
-    cursor.execute(
-        "REPLACE INTO guild_config VALUES(?, ?)",
-        (interaction.guild.id, role.id)
-    )
+    cursor.execute("REPLACE INTO guild_config VALUES(?,?)", (interaction.guild.id, role.id))
     conn.commit()
 
     await interaction.response.send_message(
@@ -115,19 +103,51 @@ def get_warn(uid):
     r = cursor.fetchone()
     return r[0] if r else 0
 
+def set_warn(uid, value):
+    cursor.execute("REPLACE INTO warnings VALUES(?,?)", (uid, value))
+    conn.commit()
+
 def add_warn(uid):
     c = get_warn(uid) + 1
-    cursor.execute("REPLACE INTO warnings VALUES(?,?)", (uid, c))
-    conn.commit()
+    set_warn(uid, c)
     return c
 
 def remove_warn(uid):
     c = max(get_warn(uid) - 1, 0)
-    cursor.execute("REPLACE INTO warnings VALUES(?,?)", (uid, c))
-    conn.commit()
+    set_warn(uid, c)
     return c
 
-# ================= LEVEL SYSTEM =================
+def clear_warn(uid):
+    set_warn(uid, 0)
+
+# ================= PUNISH SYSTEM =================
+async def auto_punish(member: discord.Member, count: int):
+    try:
+        if count == 1:
+            await member.timeout(datetime.timedelta(minutes=10))
+
+        elif count == 2:
+            await member.timeout(datetime.timedelta(hours=1))
+
+        elif count == 3:
+            await member.timeout(datetime.timedelta(days=1))
+
+        elif count == 4:
+            await member.kick()
+
+        elif count >= 5:
+            await member.ban()
+
+    except:
+        pass
+
+async def remove_punish(member: discord.Member):
+    try:
+        await member.timeout(None)
+    except:
+        pass
+
+# ================= LEVEL =================
 def add_xp(uid):
     cursor.execute("SELECT xp,level FROM levels WHERE user_id=?", (uid,))
     r = cursor.fetchone()
@@ -144,7 +164,7 @@ def add_xp(uid):
 
     return lv, xp
 
-# ================= VERIFY BUTTON =================
+# ================= VERIFY =================
 class VerifyView(discord.ui.View):
     @discord.ui.button(label="인증", style=discord.ButtonStyle.success)
     async def verify(self, i, b):
@@ -194,7 +214,7 @@ class TicketView(discord.ui.View):
 async def on_ready():
     init_db()
     await bot.tree.sync()
-    print("🔥 SERVER-AWARE BOT READY")
+    print("🔥 ULTIMATE BOT READY")
 
 @bot.event
 async def on_member_join(member):
@@ -228,39 +248,50 @@ async def warn(interaction: discord.Interaction, user: discord.Member, reason: s
     member = interaction.guild.get_member(interaction.user.id)
 
     if not is_admin(member):
-        return await interaction.response.send_message(
-            embed=embed("권한 없음", "봇 관리자만 사용 가능", 0xFF0000),
-            ephemeral=True
-        )
+        return await interaction.response.send_message("❌ 권한 없음", ephemeral=True)
 
     c = add_warn(user.id)
+    await auto_punish(user, c)
 
     await interaction.response.send_message(
-        embed=embed("경고 발급", f"{user.mention}\n{reason}\n누적: {c}회")
-    )
-
-@bot.tree.command(name="경고확인")
-async def check(interaction: discord.Interaction, user: discord.Member):
-
-    await interaction.response.send_message(
-        embed=embed("경고 확인", f"{user.mention} → {get_warn(user.id)}회")
+        embed=embed("경고", f"{user.mention}\n{reason}\n누적: {c}")
     )
 
 @bot.tree.command(name="경고감소")
-async def minus(interaction: discord.Interaction, user: discord.Member):
+async def warn_minus(interaction: discord.Interaction, user: discord.Member):
 
     member = interaction.guild.get_member(interaction.user.id)
 
     if not is_admin(member):
-        return await interaction.response.send_message(
-            embed=embed("권한 없음", "봇 관리자만 사용 가능", 0xFF0000),
-            ephemeral=True
-        )
+        return await interaction.response.send_message("❌ 권한 없음", ephemeral=True)
 
     c = remove_warn(user.id)
+    await auto_punish(user, c)
 
     await interaction.response.send_message(
-        embed=embed("경고 감소", f"{user.mention} → {c}회")
+        embed=embed("감소", f"{user.mention} → {c}")
+    )
+
+@bot.tree.command(name="경고삭제")
+async def warn_clear(interaction: discord.Interaction, user: discord.Member):
+
+    member = interaction.guild.get_member(interaction.user.id)
+
+    if not is_admin(member):
+        return await interaction.response.send_message("❌ 권한 없음", ephemeral=True)
+
+    clear_warn(user.id)
+    await remove_punish(user)
+
+    await interaction.response.send_message(
+        embed=embed("초기화", f"{user.mention} 모든 경고 삭제 + 처벌 해제")
+    )
+
+@bot.tree.command(name="경고확인")
+async def warn_check(interaction: discord.Interaction, user: discord.Member):
+
+    await interaction.response.send_message(
+        embed=embed("경고", f"{user.mention} → {get_warn(user.id)}회")
     )
 
 @bot.tree.command(name="인증패널")
