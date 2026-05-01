@@ -16,7 +16,7 @@ VERIFY_ROLE_ID = 1496479066075697234
 TICKET_CATEGORY_ID = 1496840441654677614
 STAFF_ROLE_ID = 1499592576712577138
 
-# ================= Flask (UptimeRobot 유지용) =================
+# ================= Flask (UptimeRobot 핵심) =================
 app = Flask(__name__)
 
 @app.route("/")
@@ -24,7 +24,8 @@ def home():
     return "OK - Bot Alive"
 
 def run_web():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT", 10000))  # 🔥 Render 필수
+    app.run(host="0.0.0.0", port=port)
 
 def keep_alive():
     Thread(target=run_web, daemon=True).start()
@@ -71,7 +72,7 @@ def add_warn(uid):
     return c
 
 def remove_warn(uid):
-    c = max(get_warn(uid)-1, 0)
+    c = max(get_warn(uid) - 1, 0)
     cursor.execute("REPLACE INTO warnings VALUES(?,?)", (uid, c))
     conn.commit()
     return c
@@ -136,7 +137,7 @@ class VerifyView(discord.ui.View):
 async def on_ready():
     init_db()
     await bot.tree.sync()
-    print("🔥 BOT READY (SERVICE MODE)")
+    print("🔥 BOT READY - SERVICE MODE")
 
 @bot.event
 async def on_member_join(m):
@@ -163,7 +164,6 @@ async def on_message(m):
 async def 인증패널(ctx):
     if not is_staff(ctx.author):
         return await ctx.reply("❌ 권한 없음")
-
     await ctx.send(embed=embed("인증"), view=VerifyView())
 
 @bot.command()
@@ -193,7 +193,7 @@ async def 경고확인(ctx, user: discord.Member):
     c = get_warn(user.id)
     await ctx.send(embed=embed("경고 확인", f"{user.mention} {c}회"))
 
-# ================= RUN =================
+# ================= 실행 =================
 async def main():
     keep_alive()
     await bot.start(TOKEN)
