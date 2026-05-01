@@ -35,37 +35,9 @@ conn = sqlite3.connect("bot.db", check_same_thread=False)
 cursor = conn.cursor()
 
 def init_db():
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS warnings (
-        user_id INTEGER PRIMARY KEY,
-        count INTEGER
-    )
-    """)
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS levels (
-        user_id INTEGER PRIMARY KEY,
-        xp INTEGER,
-        level INTEGER
-    )
-    """)
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS guild_config (
-        guild_id INTEGER PRIMARY KEY,
-        admin_role_id INTEGER
-    )
-    """)
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS parties (
-        guild_id INTEGER,
-        owner_id INTEGER,
-        voice_id INTEGER,
-        max_size INTEGER
-    )
-    """)
-
+    cursor.execute("CREATE TABLE IF NOT EXISTS warnings (user_id INTEGER PRIMARY KEY, count INTEGER)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS levels (user_id INTEGER PRIMARY KEY, xp INTEGER, level INTEGER)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS guild_config (guild_id INTEGER PRIMARY KEY, admin_role_id INTEGER)")
     conn.commit()
 
 # ================= BOT =================
@@ -78,7 +50,7 @@ def embed(title, desc="", color=0x5865F2):
     e.timestamp = datetime.datetime.utcnow()
     return e
 
-# ================= ADMIN ROLE SYSTEM =================
+# ================= ADMIN ROLE =================
 def get_admin_role(guild_id):
     cursor.execute("SELECT admin_role_id FROM guild_config WHERE guild_id=?", (guild_id,))
     r = cursor.fetchone()
@@ -126,7 +98,7 @@ def remove_warn(uid):
 def clear_warn(uid):
     set_warn(uid, 0)
 
-async def auto_punish(member: discord.Member, count: int):
+async def auto_punish(member, count):
     try:
         if count == 1:
             await member.timeout(datetime.timedelta(minutes=10))
@@ -141,7 +113,7 @@ async def auto_punish(member: discord.Member, count: int):
     except:
         pass
 
-async def remove_punish(member: discord.Member):
+async def remove_punish(member):
     try:
         await member.timeout(None)
     except:
@@ -172,23 +144,16 @@ class VerifyView(discord.ui.View):
         role = i.guild.get_role(VERIFY_ROLE_ID)
 
         if not role:
-            role = discord.utils.get(i.guild.roles, name="인증")
-        if not role:
             role = await i.guild.create_role(name="인증")
 
         await i.user.add_roles(role)
 
-        await i.response.send_message(
-            embed=embed("인증 완료", "서버 이용 가능"),
-            ephemeral=True
-        )
+        await i.response.send_message(embed=embed("인증 완료"), ephemeral=True)
 
 # ================= TICKET =================
 class CloseView(discord.ui.View):
     @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger)
     async def close(self, i, b):
-        await i.response.send_message(embed=embed("삭제", "채널 삭제 중..."))
-        await asyncio.sleep(2)
         await i.channel.delete()
 
 class TicketView(discord.ui.View):
@@ -204,68 +169,70 @@ class TicketView(discord.ui.View):
 
         await ch.send(i.user.mention, view=CloseView())
 
-        await i.response.send_message(embed=embed("티켓", "생성 완료"), ephemeral=True)
+        await i.response.send_message(embed=embed("티켓 생성"), ephemeral=True)
 
-# ================= PARTY SYSTEM =================
-class PartyView(discord.ui.View):
-    def __init__(self):
+# ================= PARTY =================
+class PartyControlView(discord.ui.View):
+    def __init__(self, owner_id):
         super().__init__(timeout=None)
+        self.owner_id = owner_id
 
-    async def create_party(self, interaction, size):
-        guild = interaction.guild
+    @discord.ui.button(label="파티 삭제", style=discord.ButtonStyle.danger)
+    async def delete(self, i, b):
 
-        cat = discord.utils.get(guild.categories, name=PARTY_CATEGORY_NAME)
+        if i.user.id != self.owner_id:
+            return await i.response.send_message("❌ 파티장만 가능", ephemeral=True)
+
+        await i.channel.delete()
+
+
+class PartyView(discord.ui.View):
+
+    async def create(self, i, size):
+
+        cat = discord.utils.get(i.guild.categories, name=PARTY_CATEGORY_NAME)
         if not cat:
-            cat = await guild.create_category(PARTY_CATEGORY_NAME)
+            cat = await i.guild.create_category(PARTY_CATEGORY_NAME)
 
-        vc = await guild.create_voice_channel(
-            name=f"파티-{interaction.user.display_name}-{size}인",
+        vc = await i.guild.create_voice_channel(
+            name=f"🎮 파티-{i.user.display_name}-{size}",
             category=cat
         )
 
-        cursor.execute(
-            "INSERT INTO parties VALUES(?,?,?,?)",
-            (guild.id, interaction.user.id, vc.id, size)
+        await vc.send(
+            embed=embed("🎮 파티 생성됨", f"{size}인 파티"),
+            view=PartyControlView(i.user.id)
         )
-        conn.commit()
 
-        await interaction.response.send_message(
-            embed=embed("파티 생성", f"{size}인 파티 생성 완료 🎮"),
-            ephemeral=True
-        )
+        await i.response.send_message(embed=embed("파티 생성 완료"), ephemeral=True)
 
     @discord.ui.button(label="솔로", style=discord.ButtonStyle.primary)
-    async def solo(self, i, b): await self.create_party(i, 1)
+    async def solo(self, i, b): await self.create(i, 1)
 
     @discord.ui.button(label="듀오", style=discord.ButtonStyle.primary)
-    async def duo(self, i, b): await self.create_party(i, 2)
+    async def duo(self, i, b): await self.create(i, 2)
 
     @discord.ui.button(label="트리오", style=discord.ButtonStyle.primary)
-    async def trio(self, i, b): await self.create_party(i, 3)
+    async def trio(self, i, b): await self.create(i, 3)
 
     @discord.ui.button(label="스쿼드", style=discord.ButtonStyle.primary)
-    async def squad(self, i, b): await self.create_party(i, 4)
+    async def squad(self, i, b): await self.create(i, 4)
 
     @discord.ui.button(label="5인", style=discord.ButtonStyle.primary)
-    async def five(self, i, b): await self.create_party(i, 5)
+    async def five(self, i, b): await self.create(i, 5)
 
 # ================= EVENTS =================
 @bot.event
 async def on_ready():
     init_db()
     await bot.tree.sync()
-    print("🔥 ULTIMATE BOT READY")
+    print("🔥 FINAL BOT READY")
 
 @bot.event
 async def on_member_join(member):
     ch = bot.get_channel(WELCOME_CHANNEL_ID)
     if ch:
         await ch.send(embed=embed("환영", member.mention))
-
-    try:
-        await member.send(embed=embed("환영", "가입 감사합니다"))
-    except:
-        pass
 
 @bot.event
 async def on_message(m):
@@ -279,20 +246,21 @@ async def on_message(m):
 
     await bot.process_commands(m)
 
-# ================= SLASH COMMANDS =================
-
+# ================= COMMANDS =================
 @bot.tree.command(name="경고")
-async def warn(i, user: discord.Member, reason: str = "없음"):
+async def warn(i, user: discord.Member, reason: str="없음"):
+
     if not is_admin(i.user):
         return await i.response.send_message("❌ 권한 없음", ephemeral=True)
 
     c = add_warn(user.id)
     await auto_punish(user, c)
 
-    await i.response.send_message(embed=embed("경고", f"{user.mention}\n{reason}\n누적: {c}"))
+    await i.response.send_message(embed=embed("경고", f"{user.mention}\n{reason}\n{c}회"))
 
 @bot.tree.command(name="경고감소")
 async def warn_minus(i, user: discord.Member):
+
     if not is_admin(i.user):
         return await i.response.send_message("❌ 권한 없음", ephemeral=True)
 
@@ -303,21 +271,22 @@ async def warn_minus(i, user: discord.Member):
 
 @bot.tree.command(name="경고삭제")
 async def warn_clear(i, user: discord.Member):
+
     if not is_admin(i.user):
         return await i.response.send_message("❌ 권한 없음", ephemeral=True)
 
     clear_warn(user.id)
     await remove_punish(user)
 
-    await i.response.send_message(embed=embed("초기화", "경고 + 처벌 해제"))
+    await i.response.send_message(embed=embed("초기화 완료"))
 
 @bot.tree.command(name="인증패널")
 async def verify_panel(i):
-    await i.response.send_message(embed=embed("인증 패널"), view=VerifyView())
+    await i.response.send_message(embed=embed("인증"), view=VerifyView())
 
 @bot.tree.command(name="티켓패널")
 async def ticket_panel(i):
-    await i.response.send_message(embed=embed("티켓 패널"), view=TicketView())
+    await i.response.send_message(embed=embed("티켓"), view=TicketView())
 
 @bot.tree.command(name="파티패널")
 async def party_panel(i):
