@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord import app_commands
 import datetime
 import os
@@ -16,8 +16,7 @@ LOG_CHANNEL_ID = 1496478745538855146
 WELCOME_CHANNEL_ID = 1496478743873589448
 VERIFY_ROLE_ID = 1496479066075697234
 TICKET_CATEGORY_ID = 1496840441654677614
-
-STAFF_ROLE_ID = 1499592576712577138  # 🔥 운영진 역할
+STAFF_ROLE_ID = 1499592576712577138
 
 # ================= DB =================
 conn = sqlite3.connect("bot.db", check_same_thread=False)
@@ -38,7 +37,6 @@ app.secret_key = "secretkey"
 def is_logged_in():
     return session.get("login")
 
-# HTML
 HTML = """
 <h1>🤖 봇 대시보드</h1>
 
@@ -95,7 +93,9 @@ def web_warn():
                 await log(f"[웹] {m} 경고 {count} | {reason}")
                 break
 
-    bot.loop.create_task(punish())
+    # 🔥 안전 실행 (loop 안전 처리)
+    bot.loop.call_soon_threadsafe(lambda: asyncio.create_task(punish()))
+
     return redirect("/dash")
 
 def run_web():
@@ -120,10 +120,6 @@ async def log(msg):
     ch = bot.get_channel(LOG_CHANNEL_ID)
     if ch:
         await safe_send(ch, embed=embed("📜 로그", msg))
-
-# ================= 권한 =================
-def is_staff(interaction: discord.Interaction):
-    return any(r.id == STAFF_ROLE_ID for r in interaction.user.roles)
 
 # ================= 경고 =================
 def get_warn(uid):
@@ -153,7 +149,7 @@ async def auto_punish(m, c):
             await m.timeout(datetime.timedelta(days=1))
         elif c==4:
             await m.kick()
-        elif c==5:
+        elif c>=5:
             await m.ban()
     except:
         pass
@@ -176,19 +172,15 @@ class CloseView(discord.ui.View):
     @discord.ui.button(label="닫기",style=discord.ButtonStyle.danger)
     async def close(self,i,b):
         await i.response.send_message("삭제됨")
-        await asyncio.sleep(5)
-        try:
-            await i.channel.delete()
-        except:
-            pass
+        await asyncio.sleep(3)
+        await i.channel.delete()
 
 class TicketView(discord.ui.View):
     @discord.ui.button(label="티켓",style=discord.ButtonStyle.primary)
     async def t(self,i,b):
-        g=i.guild
-        c=g.get_channel(TICKET_CATEGORY_ID)
-        ch=await g.create_text_channel(name=f"ticket-{i.user.id}",category=c)
-        await ch.send(f"{i.user.mention}",view=CloseView())
+        c=i.guild.get_channel(TICKET_CATEGORY_ID)
+        ch=await i.guild.create_text_channel(name=f"ticket-{i.user.id}",category=c)
+        await ch.send(i.user.mention,view=CloseView())
         await i.response.send_message("생성됨",ephemeral=True)
 
 # ================= 인증 =================
@@ -200,6 +192,9 @@ class VerifyView(discord.ui.View):
         await i.response.send_message("완료",ephemeral=True)
 
 # ================= 명령어 =================
+def is_staff(interaction):
+    return any(r.id == STAFF_ROLE_ID for r in interaction.user.roles)
+
 @bot.tree.command(name="경고")
 @app_commands.check(is_staff)
 async def warn(i,u:discord.Member,이유:str):
@@ -224,11 +219,6 @@ async def check(i,u:discord.Member):
 async def ticket(i):
     await i.response.send_message(embed=embed("티켓"),view=TicketView())
 
-@bot.command()
-@commands.check(lambda ctx: any(r.id==STAFF_ROLE_ID for r in ctx.author.roles))
-async def 인증패널(ctx):
-    await ctx.send(embed=embed("인증"),view=VerifyView())
-
 # ================= 이벤트 =================
 @bot.event
 async def on_message(m):
@@ -244,25 +234,14 @@ async def on_member_join(m):
     if ch:
         await safe_send(ch,embed=embed("환영",m.mention))
 
-# ================= 에러 =================
-@bot.tree.error
-async def err(i,e):
-    if isinstance(e,app_commands.errors.CheckFailure):
-        await i.response.send_message("❌ 운영진만 사용 가능",ephemeral=True)
-
-# ================= 실행 =================
 @bot.event
 async def on_ready():
     await bot.tree.sync()
-    print("🔥 최종 봇 실행 완료")
+    print("🔥 봇 실행 완료")
 
-def run_bot():
-    while True:
-        try:
-            bot.run(TOKEN)
-        except Exception as e:
-            print("재시작",e)
-            asyncio.sleep(5)
+# ================= 실행 =================
+async def start():
+    keep_alive()
+    await bot.start(TOKEN)
 
-keep_alive()
-run_bot()
+asyncio.run(start())
