@@ -13,7 +13,8 @@ from threading import Thread
 TOKEN = os.getenv("TOKEN")
 
 intents = discord.Intents.all()
-bot = commands.Bot(command_prefix="!", intents=intents)
+# help_command=None → discord.py 기본 !help 제거 (alias 충돌 방지)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 # ================== KEEP ALIVE ==================
 # UptimeRobot 없이도 Render 웹 서비스로 유지됨
@@ -759,7 +760,7 @@ async def pfx_purge(ctx: commands.Context, 개수: int):
     log_e.add_field(name="실행자", value=f"{ctx.author.mention} (`{ctx.author}`)", inline=False)
     await send_log(ctx.guild, [log_e])
 
-@bot.command(name="도움말", aliases=["help", "h"])
+@bot.command(name="도움말", aliases=["h", "명령어"])
 async def pfx_help(ctx: commands.Context):
     e = discord.Embed(title="📖 명령어 도움말",
         description="슬래시(`/`) 및 접두사(`!`) 명령어 모두 지원합니다.",
