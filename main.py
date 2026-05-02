@@ -13,12 +13,9 @@ from threading import Thread
 TOKEN = os.getenv("TOKEN")
 
 intents = discord.Intents.all()
-# help_command=None → discord.py 기본 !help 제거 (alias 충돌 방지)
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 # ================== KEEP ALIVE ==================
-# UptimeRobot 없이도 Render 웹 서비스로 유지됨
-# Render 배포 시 "Web Service"로 설정하면 포트 자동 관리됨
 app = Flask(__name__)
 
 @app.route("/")
@@ -58,7 +55,6 @@ def init_db():
         levelup_ch    INTEGER,
         party_cat     INTEGER
     )""")
-    # 기존 테이블 컬럼 마이그레이션
     for col in ["levelup_ch INTEGER", "party_cat INTEGER"]:
         try:
             cur.execute(f"ALTER TABLE guild_config ADD COLUMN {col}")
@@ -78,7 +74,6 @@ def init_db():
         last_msg INTEGER DEFAULT 0,
         PRIMARY KEY (guild_id, uid)
     )""")
-    # 음성채널 체류시간 추적 (입장 타임스탬프)
     cur.execute("""CREATE TABLE IF NOT EXISTS voice_track (
         guild_id   INTEGER,
         uid        INTEGER,
@@ -124,7 +119,6 @@ def set_cfg(guild_id: int, **kwargs):
 
 # ================== PERMISSION HELPERS ==================
 def _check_perm(guild: discord.Guild, user: discord.Member) -> bool:
-    """서버 소유자 또는 관리자 역할 보유자만 True"""
     if user.id == guild.owner_id:
         return True
     if user.guild_permissions.administrator:
@@ -163,25 +157,87 @@ async def send_log(guild: discord.Guild, embeds: list):
 # ================== ECONOMY ==================
 def money(uid):
     cur.execute("SELECT bal FROM money WHERE uid=?", (uid,))
-    r = cur.fetchone(); return r[0] if r else 0
+    r = cur.fetchone()
+    return r[0] if r else 0
 
 def add_money(uid, v):
-    cur.execute("REPLACE INTO money VALUES (?,?)", (uid, money(uid) + v)); conn.commit()
+    cur.execute("REPLACE INTO money VALUES (?,?)", (uid, money(uid) + v))
+    conn.commit()
 
 def sub_money(uid, v):
-    cur.execute("REPLACE INTO money VALUES (?,?)", (uid, money(uid) - v)); conn.commit()
+    cur.execute("REPLACE INTO money VALUES (?,?)", (uid, money(uid) - v))
+    conn.commit()
 
 # ================== WARN ==================
 def get_warn(uid):
     cur.execute("SELECT cnt FROM warn WHERE uid=?", (uid,))
-    r = cur.fetchone(); return r[0] if r else 0
+    r = cur.fetchone()
+    return r[0] if r else 0
 
 def add_warn(uid):
     c = get_warn(uid) + 1
-    cur.execute("REPLACE INTO warn VALUES (?,?)", (uid, c)); conn.commit(); return c
+    cur.execute("REPLACE INTO warn VALUES (?,?)", (uid, c))
+    conn.commit()
+    return c
 
 def clear_warn(uid):
-    cur.execute("REPLACE INTO warn VALUES (?,0)", (uid,)); conn.commit()
+    cur.execute("REPLACE INTO warn VALUES (?,0)", (uid,))
+    conn.commit()
+
+def warn_punishment_text(count: int) -> str:
+    if count == 1:
+        return "타임아웃 10분"
+    if count == 2:
+        return "타임아웃 1시간"
+    if count == 3:
+        return "타임아웃 1일"
+    if count == 4:
+        return "추방"
+    if count >= 5:
+        return "차단"
+    return "없음"
+
+async def apply_warn_punishment(member: discord.Member, count: int):
+    try:
+        if count == 1:
+            until = discord.utils.utcnow() + datetime.timedelta(minutes=10)
+            await member.timeout(until, reason="경고 1회 - 10분 타임아웃")
+        elif count == 2:
+            until = discord.utils.utcnow() + datetime.timedelta(hours=1)
+            await member.timeout(until, reason="경고 2회 - 1시간 타임아웃")
+        elif count == 3:
+            until = discord.utils.utcnow() + datetime.timedelta(days=1)
+            await member.timeout(until, reason="경고 3회 - 1일 타임아웃")
+        elif count == 4:
+            await member.kick(reason="경고 4회 - 추방")
+        elif count >= 5:
+            await member.ban(reason="경고 5회 - 차단")
+    except Exception as e:
+        print(f"경고 처벌 오류: {e}")
+
+async def remove_warn_punishment(guild: discord.Guild, user: discord.User):
+    member = guild.get_member(user.id)
+    if member:
+        try:
+            await member.timeout(None, reason="경고 삭제 - 처벌 해제")
+        except Exception as e:
+            print(f"타임아웃 해제 오류: {e}")
+    try:
+        await guild.fetch_ban(user)
+        await guild.unban(user, reason="경고 삭제 - 차단 해제")
+    except discord.NotFound:
+        pass
+    except Exception as e:
+        print(f"차단 해제 오류: {e}")
+
+def warn_check_embed(user: discord.User):
+    count = get_warn(user.id)
+    e = discord.Embed(title="⚠️ 경고 확인", color=0xFEE75C, timestamp=datetime.datetime.utcnow())
+    e.add_field(name="유저", value=user.mention, inline=True)
+    e.add_field(name="누적 경고", value=f"**{count}회**", inline=True)
+    e.add_field(name="현재 처벌", value=f"**{warn_punishment_text(count)}**", inline=False)
+    e.set_thumbnail(url=user.display_avatar.url)
+    return e
 
 # ================== LEVEL SYSTEM ==================
 def xp_needed(lv: int) -> int:
@@ -189,27 +245,31 @@ def xp_needed(lv: int) -> int:
 
 def get_lv(guild_id, uid):
     cur.execute("SELECT xp, lv, last_msg FROM levels WHERE guild_id=? AND uid=?", (guild_id, uid))
-    r = cur.fetchone(); return (r[0], r[1], r[2]) if r else (0, 0, 0)
+    r = cur.fetchone()
+    return (r[0], r[1], r[2]) if r else (0, 0, 0)
 
 def save_lv(guild_id, uid, xp, lv, last_msg):
     cur.execute("""INSERT INTO levels (guild_id,uid,xp,lv,last_msg) VALUES(?,?,?,?,?)
                    ON CONFLICT(guild_id,uid) DO UPDATE SET
                    xp=excluded.xp, lv=excluded.lv, last_msg=excluded.last_msg""",
-                (guild_id, uid, xp, lv, last_msg)); conn.commit()
+                (guild_id, uid, xp, lv, last_msg))
+    conn.commit()
 
 def get_rank(guild_id, uid):
     cur.execute("SELECT uid FROM levels WHERE guild_id=? ORDER BY lv DESC, xp DESC", (guild_id,))
     for i, (r,) in enumerate(cur.fetchall(), 1):
-        if r == uid: return i
+        if r == uid:
+            return i
     return 0
 
 def get_top(guild_id, limit=10):
     cur.execute("SELECT uid,xp,lv FROM levels WHERE guild_id=? ORDER BY lv DESC, xp DESC LIMIT ?",
-                (guild_id, limit)); return cur.fetchall()
+                (guild_id, limit))
+    return cur.fetchall()
 
 async def grant_xp(guild: discord.Guild, member: discord.Member, amount: int):
-    """XP 부여 후 레벨업 처리. 레벨업 시 알림 전송."""
-    if member.bot: return
+    if member.bot:
+        return
     xp, lv, last_msg = get_lv(guild.id, member.id)
     xp += amount
     leveled_up = False
@@ -219,11 +279,9 @@ async def grant_xp(guild: discord.Guild, member: discord.Member, amount: int):
         new_lv += 1
         leveled_up = True
     save_lv(guild.id, member.id, xp, new_lv, last_msg)
-
     if leveled_up:
         cfg = get_cfg(guild.id)
         ch = guild.get_channel(cfg["levelup_ch"]) if cfg["levelup_ch"] else None
-
         lv_e = discord.Embed(
             title="🎉  레벨 업!",
             description=(
@@ -240,22 +298,20 @@ async def grant_xp(guild: discord.Guild, member: discord.Member, amount: int):
             await ch.send(content=member.mention, embed=lv_e)
 
 async def process_chat_xp(message: discord.Message):
-    """채팅 XP: 60초 쿨다운, 메시지당 15~25 XP"""
-    if not message.guild or message.author.bot: return
+    if not message.guild or message.author.bot:
+        return
     xp, lv, last_msg = get_lv(message.guild.id, message.author.id)
     now = int(datetime.datetime.utcnow().timestamp())
-    if now - last_msg < 60: return
-    save_lv(message.guild.id, message.author.id, xp, lv, now)   # 쿨다운 갱신 먼저
+    if now - last_msg < 60:
+        return
+    save_lv(message.guild.id, message.author.id, xp, lv, now)
     await grant_xp(message.guild, message.author, random.randint(15, 25))
 
 # ================== VOICE XP BACKGROUND TASK ==================
-# 음성채널 입장 시간을 tracking, 1분마다 XP 부여
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     guild = member.guild
     now = int(datetime.datetime.utcnow().timestamp())
-
-    # 파티 자동 이동 처리
     cur.execute("SELECT voice_id FROM party WHERE guild_id=? AND owner_id=?", (guild.id, member.id))
     r = cur.fetchone()
     if r and after.channel:
@@ -265,21 +321,17 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 await member.move_to(vc)
             except Exception:
                 pass
-
-    # 음성 채널 입장
     if after.channel and not before.channel:
         cur.execute("INSERT OR REPLACE INTO voice_track VALUES (?,?,?)", (guild.id, member.id, now))
         conn.commit()
-
-    # 음성 채널 퇴장 → 체류시간에 따라 XP 지급
     elif before.channel and not after.channel:
         cur.execute("SELECT joined_at FROM voice_track WHERE guild_id=? AND uid=?", (guild.id, member.id))
         row = cur.fetchone()
         if row:
-            duration = now - row[0]   # 초 단위
+            duration = now - row[0]
             minutes = duration // 60
             if minutes > 0:
-                xp_gain = min(minutes * 10, 200)   # 분당 10XP, 최대 200XP
+                xp_gain = min(minutes * 10, 200)
                 await grant_xp(guild, member, xp_gain)
             cur.execute("DELETE FROM voice_track WHERE guild_id=? AND uid=?", (guild.id, member.id))
             conn.commit()
@@ -287,24 +339,26 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 # ================== STICKY ==================
 def get_sticky(channel_id):
     cur.execute("SELECT content, message_id FROM sticky WHERE channel_id=?", (channel_id,))
-    r = cur.fetchone(); return r if r else None
+    r = cur.fetchone()
+    return r if r else None
 
 def set_sticky(channel_id, guild_id, content, message_id):
     cur.execute("""INSERT INTO sticky VALUES (?,?,?,?)
                    ON CONFLICT(channel_id) DO UPDATE SET
                    content=excluded.content, message_id=excluded.message_id""",
-                (channel_id, guild_id, content, message_id)); conn.commit()
+                (channel_id, guild_id, content, message_id))
+    conn.commit()
 
 def del_sticky(channel_id):
-    cur.execute("DELETE FROM sticky WHERE channel_id=?", (channel_id,)); conn.commit()
+    cur.execute("DELETE FROM sticky WHERE channel_id=?", (channel_id,))
+    conn.commit()
 
 # ============================================================
 # =====================  UI VIEWS  ===========================
 # ============================================================
-
-# ── 인증 뷰 ──
 class VerifyView(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
+    def __init__(self):
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="인증하기", emoji="✅", style=discord.ButtonStyle.success, custom_id="v_verify")
     async def verify(self, itx: discord.Interaction, btn: discord.ui.Button):
@@ -317,16 +371,18 @@ class VerifyView(discord.ui.View):
         if role in itx.user.roles:
             return await itx.followup.send(embed=warn_embed("이미 인증됨", "이미 인증된 상태입니다."), ephemeral=True)
         await itx.user.add_roles(role)
-        # DM
         try:
-            dm_e = discord.Embed(title="✅  인증 완료",
+            dm_e = discord.Embed(
+                title="✅  인증 완료",
                 description=f"**{itx.guild.name}** 인증 완료!\n> 역할 `{role.name}` 이(가) 부여되었습니다.\n> 즐거운 시간 보내세요 🎉",
-                color=0x57F287)
+                color=0x57F287
+            )
             dm_e.set_thumbnail(url=itx.guild.icon.url if itx.guild.icon else None)
             dm_e.set_footer(text=itx.guild.name)
             dm_e.timestamp = datetime.datetime.utcnow()
             await itx.user.send(embed=dm_e)
-        except discord.Forbidden: pass
+        except discord.Forbidden:
+            pass
         await itx.followup.send(embed=success_embed("인증 완료!", f"`{role.name}` 역할 부여됨"), ephemeral=True)
         log_e = discord.Embed(title="📋 인증 로그", color=0x57F287, timestamp=datetime.datetime.utcnow())
         log_e.add_field(name="유저", value=f"{itx.user.mention} (`{itx.user}`)")
@@ -334,9 +390,9 @@ class VerifyView(discord.ui.View):
         log_e.set_thumbnail(url=itx.user.display_avatar.url)
         await send_log(itx.guild, [log_e])
 
-# ── 티켓 뷰 ──
 class TicketView(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
+    def __init__(self):
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="티켓 생성", emoji="🎟️", style=discord.ButtonStyle.primary, custom_id="v_ticket")
     async def create(self, itx: discord.Interaction, btn: discord.ui.Button):
@@ -351,13 +407,17 @@ class TicketView(discord.ui.View):
         }
         if cfg["admin_role"]:
             ar = itx.guild.get_role(cfg["admin_role"])
-            if ar: ow[ar] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+            if ar:
+                ow[ar] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
         ch = await itx.guild.create_text_channel(
             name=f"ticket-{itx.user.name}", overwrites=ow,
-            topic=f"{itx.user} 의 티켓 | {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC")
-        te = discord.Embed(title="🎟️ 티켓 생성됨",
+            topic=f"{itx.user} 의 티켓 | {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
+        )
+        te = discord.Embed(
+            title="🎟️ 티켓 생성됨",
             description=f"안녕하세요 {itx.user.mention}님!\n관리자가 곧 답변드립니다.\n문의 내용을 작성해 주세요.",
-            color=0x5865F2, timestamp=datetime.datetime.utcnow())
+            color=0x5865F2, timestamp=datetime.datetime.utcnow()
+        )
         te.set_footer(text="티켓을 닫으려면 아래 버튼을 눌러주세요.")
         te.set_thumbnail(url=itx.user.display_avatar.url)
         await ch.send(embed=te, view=TicketCloseView())
@@ -369,7 +429,8 @@ class TicketView(discord.ui.View):
         await send_log(itx.guild, [log_e])
 
 class TicketCloseView(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
+    def __init__(self):
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="티켓 닫기", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="v_ticket_close")
     async def close(self, itx: discord.Interaction, btn: discord.ui.Button):
@@ -379,9 +440,9 @@ class TicketCloseView(discord.ui.View):
         await asyncio.sleep(3)
         await itx.channel.delete()
 
-# ── 파티 뷰 ──
 class PartyView(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
+    def __init__(self):
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="파티 참가", emoji="🎮", style=discord.ButtonStyle.success, custom_id="v_party_join")
     async def join(self, itx: discord.Interaction, btn: discord.ui.Button):
@@ -397,9 +458,9 @@ class PartyView(discord.ui.View):
         else:
             await itx.followup.send(embed=error_embed("채널 없음"), ephemeral=True)
 
-# ── 관리자 패널 뷰 ──
 class AdminPanel(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
+    def __init__(self):
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="파티 목록", emoji="🎮", style=discord.ButtonStyle.primary, custom_id="v_ap_party")
     async def party(self, itx: discord.Interaction, btn: discord.ui.Button):
@@ -417,7 +478,7 @@ class AdminPanel(discord.ui.View):
         rows = cur.fetchall()
         if not rows:
             return await itx.followup.send(embed=info_embed("경고 없음"), ephemeral=True)
-        await itx.followup.send(embed=warn_embed("경고 목록", "\n".join(f"<@{r[0]}> — **{r[1]}회**" for r in rows)), ephemeral=True)
+        await itx.followup.send(embed=warn_embed("경고 목록", "\n".join(f"<@{r[0]}> — **{r[1]}회** ({warn_punishment_text(r[1])})" for r in rows)), ephemeral=True)
 
     @discord.ui.button(label="티켓 목록", emoji="🎟️", style=discord.ButtonStyle.success, custom_id="v_ap_ticket")
     async def tickets(self, itx: discord.Interaction, btn: discord.ui.Button):
@@ -430,8 +491,6 @@ class AdminPanel(discord.ui.View):
 # ============================================================
 # =================  SLASH COMMANDS  ========================
 # ============================================================
-
-# ── /역할 ──
 @bot.tree.command(name="역할", description="[소유자 전용] 인증 역할 및 봇 관리자 역할을 설정합니다.")
 async def cmd_roles(itx: discord.Interaction, 인증역할: discord.Role, 관리자역할: discord.Role):
     if itx.user.id != itx.guild.owner_id and not itx.user.guild_permissions.administrator:
@@ -443,7 +502,6 @@ async def cmd_roles(itx: discord.Interaction, 인증역할: discord.Role, 관리
     e.set_footer(text=f"설정자: {itx.user}")
     await itx.response.send_message(embed=e)
 
-# ── /채널설정 ──
 @bot.tree.command(name="채널설정", description="입장·로그·레벨업 채널 및 파티 카테고리를 설정합니다.")
 async def cmd_channels(
     itx: discord.Interaction,
@@ -452,12 +510,10 @@ async def cmd_channels(
     레벨업채널: discord.TextChannel,
     파티카테고리: discord.CategoryChannel
 ):
-    if not is_admin(itx): return await deny(itx)
-    set_cfg(itx.guild.id,
-            welcome_ch=입장채널.id,
-            log_ch=로그채널.id,
-            levelup_ch=레벨업채널.id,
-            party_cat=파티카테고리.id)
+    if not is_admin(itx):
+        return await deny(itx)
+    set_cfg(itx.guild.id, welcome_ch=입장채널.id, log_ch=로그채널.id,
+            levelup_ch=레벨업채널.id, party_cat=파티카테고리.id)
     e = discord.Embed(title="⚙️ 채널 설정 완료", color=0x57F287, timestamp=datetime.datetime.utcnow())
     e.add_field(name="👋 입장", value=입장채널.mention, inline=True)
     e.add_field(name="📋 로그", value=로그채널.mention, inline=True)
@@ -466,46 +522,52 @@ async def cmd_channels(
     e.set_footer(text=f"설정자: {itx.user}")
     await itx.response.send_message(embed=e)
 
-# ── /인증패널 ──
 @bot.tree.command(name="인증패널", description="인증 패널을 전송합니다.")
 async def cmd_verify_panel(itx: discord.Interaction):
-    if not is_admin(itx): return await deny(itx)
-    e = discord.Embed(title="✅ 서버 인증",
+    if not is_admin(itx):
+        return await deny(itx)
+    e = discord.Embed(
+        title="✅ 서버 인증",
         description="아래 버튼을 눌러 인증을 완료하세요.\n> 인증 완료 시 역할이 자동 부여됩니다.\n> 완료 후 DM으로 안내가 전송됩니다.",
-        color=0x57F287, timestamp=datetime.datetime.utcnow())
+        color=0x57F287, timestamp=datetime.datetime.utcnow()
+    )
     e.set_footer(text=itx.guild.name, icon_url=itx.guild.icon.url if itx.guild.icon else None)
     await itx.response.send_message(embed=e, view=VerifyView())
 
-# ── /티켓패널 ──
 @bot.tree.command(name="티켓패널", description="티켓 패널을 전송합니다.")
 async def cmd_ticket_panel(itx: discord.Interaction):
-    if not is_admin(itx): return await deny(itx)
-    e = discord.Embed(title="🎟️ 티켓 시스템",
+    if not is_admin(itx):
+        return await deny(itx)
+    e = discord.Embed(
+        title="🎟️ 티켓 시스템",
         description="문의사항이 있으면 아래 버튼을 눌러 티켓을 생성하세요.\n> 1인당 1개만 생성 가능합니다.",
-        color=0x5865F2, timestamp=datetime.datetime.utcnow())
+        color=0x5865F2, timestamp=datetime.datetime.utcnow()
+    )
     e.set_footer(text=itx.guild.name, icon_url=itx.guild.icon.url if itx.guild.icon else None)
     await itx.response.send_message(embed=e, view=TicketView())
 
-# ── /관리자패널 ──
 @bot.tree.command(name="관리자패널", description="관리자 패널을 전송합니다.")
 async def cmd_admin_panel(itx: discord.Interaction):
-    if not is_admin(itx): return await deny(itx)
-    e = discord.Embed(title="⚙️ 관리자 패널",
+    if not is_admin(itx):
+        return await deny(itx)
+    e = discord.Embed(
+        title="⚙️ 관리자 패널",
         description="서버 관리 도구입니다. 버튼으로 각 기능을 확인하세요.",
-        color=0xEB459E, timestamp=datetime.datetime.utcnow())
+        color=0xEB459E, timestamp=datetime.datetime.utcnow()
+    )
     e.set_footer(text=f"관리자: {itx.user}", icon_url=itx.user.display_avatar.url)
     await itx.response.send_message(embed=e, view=AdminPanel())
 
-# ── /청소 ──
 @bot.tree.command(name="청소", description="메시지를 일괄 삭제합니다. (최대 100개)")
 async def cmd_purge(itx: discord.Interaction, 개수: int):
-    if not is_admin(itx): return await deny(itx)
+    if not is_admin(itx):
+        return await deny(itx)
     if not 1 <= 개수 <= 100:
         return await itx.response.send_message(embed=error_embed("잘못된 입력", "1~100 사이 숫자를 입력하세요."), ephemeral=True)
     await itx.response.defer(ephemeral=True)
     deleted = await itx.channel.purge(limit=개수)
     res_e = discord.Embed(title="🧹 청소 완료", description=f"**{len(deleted)}개** 삭제 완료",
-        color=0x57F287, timestamp=datetime.datetime.utcnow())
+                          color=0x57F287, timestamp=datetime.datetime.utcnow())
     res_e.add_field(name="채널", value=itx.channel.mention, inline=True)
     res_e.add_field(name="실행자", value=itx.user.mention, inline=True)
     await itx.followup.send(embed=res_e, ephemeral=True)
@@ -515,37 +577,34 @@ async def cmd_purge(itx: discord.Interaction, 개수: int):
     log_e.add_field(name="실행자", value=f"{itx.user.mention} (`{itx.user}`)", inline=False)
     await send_log(itx.guild, [log_e])
 
-# ── /경고 ──
 @bot.tree.command(name="경고", description="유저에게 경고를 부여합니다.")
 async def cmd_warn(itx: discord.Interaction, 유저: discord.Member):
-    if not is_admin(itx): return await deny(itx)
+    if not is_admin(itx):
+        return await deny(itx)
     c = add_warn(유저.id)
+    punishment = warn_punishment_text(c)
     e = discord.Embed(title="⚠️ 경고 부여", color=0xFEE75C, timestamp=datetime.datetime.utcnow())
     e.add_field(name="대상", value=유저.mention, inline=True)
     e.add_field(name="누적 경고", value=f"**{c}회**", inline=True)
+    e.add_field(name="처벌", value=f"**{punishment}**", inline=False)
     e.set_thumbnail(url=유저.display_avatar.url)
     await itx.response.send_message(embed=e)
     await send_log(itx.guild, [e])
-    # 자동 처벌
-    try:
-        if c == 3:
-            until = discord.utils.utcnow() + datetime.timedelta(hours=1)
-            await 유저.timeout(until, reason="경고 3회 누적 — 1시간 타임아웃")
-        elif c == 5:
-            await 유저.kick(reason="경고 5회 누적")
-        elif c >= 7:
-            await 유저.ban(reason="경고 7회 누적")
-    except Exception:
-        pass
+    await apply_warn_punishment(유저, c)
 
-# ── /경고삭제 ──
-@bot.tree.command(name="경고삭제", description="유저의 경고를 초기화합니다.")
-async def cmd_warn_clear(itx: discord.Interaction, 유저: discord.Member):
-    if not is_admin(itx): return await deny(itx)
+@bot.tree.command(name="경고삭제", description="유저의 경고를 초기화하고 처벌을 해제합니다.")
+async def cmd_warn_clear(itx: discord.Interaction, 유저: discord.User):
+    if not is_admin(itx):
+        return await deny(itx)
     clear_warn(유저.id)
-    await itx.response.send_message(embed=success_embed("경고 초기화", f"{유저.mention} 경고 초기화 완료"))
+    await remove_warn_punishment(itx.guild, 유저)
+    await itx.response.send_message(embed=success_embed("경고 초기화", f"{유저.mention} 경고 초기화 및 처벌 해제 완료"))
 
-# ── /잔액 ──
+@bot.tree.command(name="경고확인", description="유저의 경고 횟수와 현재 처벌 단계를 확인합니다.")
+async def cmd_warn_check(itx: discord.Interaction, 유저: discord.User = None):
+    user = 유저 or itx.user
+    await itx.response.send_message(embed=warn_check_embed(user))
+
 @bot.tree.command(name="잔액", description="잔액을 확인합니다.")
 async def cmd_bal(itx: discord.Interaction, 유저: discord.Member = None):
     user = 유저 or itx.user
@@ -555,21 +614,20 @@ async def cmd_bal(itx: discord.Interaction, 유저: discord.Member = None):
     e.set_thumbnail(url=user.display_avatar.url)
     await itx.response.send_message(embed=e)
 
-# ── /송금 ──
 @bot.tree.command(name="송금", description="다른 유저에게 송금합니다.")
 async def cmd_pay(itx: discord.Interaction, 유저: discord.Member, 금액: int):
     if 금액 <= 0:
         return await itx.response.send_message(embed=error_embed("잘못된 금액"), ephemeral=True)
     if money(itx.user.id) < 금액:
         return await itx.response.send_message(embed=error_embed("잔액 부족"), ephemeral=True)
-    sub_money(itx.user.id, 금액); add_money(유저.id, 금액)
+    sub_money(itx.user.id, 금액)
+    add_money(유저.id, 금액)
     e = discord.Embed(title="💸 송금 완료", color=0x57F287, timestamp=datetime.datetime.utcnow())
     e.add_field(name="보낸 사람", value=itx.user.mention, inline=True)
     e.add_field(name="받은 사람", value=유저.mention, inline=True)
     e.add_field(name="금액", value=f"**{금액:,}원**", inline=False)
     await itx.response.send_message(embed=e)
 
-# ── /레벨 ──
 @bot.tree.command(name="레벨", description="레벨을 확인합니다.")
 async def cmd_level(itx: discord.Interaction, 유저: discord.Member = None):
     user = 유저 or itx.user
@@ -580,15 +638,14 @@ async def cmd_level(itx: discord.Interaction, 유저: discord.Member = None):
     bar = "█" * filled + "░" * (20 - filled)
     e = discord.Embed(title="⭐ 레벨 정보", color=0xF1C40F, timestamp=datetime.datetime.utcnow())
     e.set_thumbnail(url=user.display_avatar.url)
-    e.add_field(name="유저",     value=user.mention,              inline=True)
-    e.add_field(name="레벨",     value=f"**{lv}**",               inline=True)
-    e.add_field(name="서버 순위", value=f"**#{rank}**",            inline=True)
-    e.add_field(name="경험치",   value=f"`{xp:,}` / `{needed:,}`", inline=True)
-    e.add_field(name="진행도",   value=f"`{bar}` {int(xp/needed*100)}%", inline=False)
+    e.add_field(name="유저", value=user.mention, inline=True)
+    e.add_field(name="레벨", value=f"**{lv}**", inline=True)
+    e.add_field(name="서버 순위", value=f"**#{rank}**", inline=True)
+    e.add_field(name="경험치", value=f"`{xp:,}` / `{needed:,}`", inline=True)
+    e.add_field(name="진행도", value=f"`{bar}` {int(xp/needed*100)}%", inline=False)
     e.set_footer(text=f"{itx.guild.name} 레벨 시스템")
     await itx.response.send_message(embed=e)
 
-# ── /순위 ──
 @bot.tree.command(name="순위", description="서버 레벨 순위를 확인합니다.")
 async def cmd_rank(itx: discord.Interaction):
     rows = get_top(itx.guild.id)
@@ -601,7 +658,6 @@ async def cmd_rank(itx: discord.Interaction):
     e.set_footer(text=f"{itx.guild.name} 레벨 시스템")
     await itx.response.send_message(embed=e)
 
-# ── /파티생성 ──
 @bot.tree.command(name="파티생성", description="파티 음성 채널을 생성합니다.")
 async def cmd_party_create(itx: discord.Interaction):
     await itx.response.defer()
@@ -610,15 +666,11 @@ async def cmd_party_create(itx: discord.Interaction):
         return await itx.followup.send(embed=warn_embed("이미 파티 존재", "기존 파티를 먼저 삭제하세요."), ephemeral=True)
     cfg = get_cfg(itx.guild.id)
     category = itx.guild.get_channel(cfg["party_cat"]) if cfg["party_cat"] else None
-    vc = await itx.guild.create_voice_channel(
-        name=f"🎮 {itx.user.display_name}의 파티",
-        category=category
-    )
+    vc = await itx.guild.create_voice_channel(name=f"🎮 {itx.user.display_name}의 파티", category=category)
     cur.execute("INSERT OR REPLACE INTO party VALUES (?,?,?)", (itx.guild.id, itx.user.id, vc.id))
     conn.commit()
     await itx.followup.send(embed=success_embed("파티 생성 완료", f"채널 {vc.mention} 생성됨"), view=PartyView())
 
-# ── /파티삭제 ──
 @bot.tree.command(name="파티삭제", description="자신의 파티 채널을 삭제합니다.")
 async def cmd_party_delete(itx: discord.Interaction):
     await itx.response.defer()
@@ -627,46 +679,48 @@ async def cmd_party_delete(itx: discord.Interaction):
     if not r:
         return await itx.followup.send(embed=error_embed("파티 없음"), ephemeral=True)
     vc = itx.guild.get_channel(r[0])
-    if vc: await vc.delete()
+    if vc:
+        await vc.delete()
     cur.execute("DELETE FROM party WHERE guild_id=? AND owner_id=?", (itx.guild.id, itx.user.id))
     conn.commit()
     await itx.followup.send(embed=success_embed("파티 삭제 완료"))
 
-# ── /스티키 ──
 @bot.tree.command(name="스티키", description="채널에 고정 메시지를 설정합니다.")
 async def cmd_sticky_set(itx: discord.Interaction, 내용: str):
-    if not is_admin(itx): return await deny(itx)
+    if not is_admin(itx):
+        return await deny(itx)
     await itx.response.defer(ephemeral=True)
     existing = get_sticky(itx.channel.id)
     if existing:
         try:
             old = await itx.channel.fetch_message(existing[1])
             await old.delete()
-        except Exception: pass
+        except Exception:
+            pass
     se = discord.Embed(title="📌 고정 메시지", description=내용, color=0xF1C40F, timestamp=datetime.datetime.utcnow())
     se.set_footer(text="📌 이 메시지는 채널 하단에 고정됩니다.")
     msg = await itx.channel.send(embed=se)
     set_sticky(itx.channel.id, itx.guild.id, 내용, msg.id)
     await itx.followup.send(embed=success_embed("스티키 설정 완료"), ephemeral=True)
 
-# ── /스티키해제 ──
 @bot.tree.command(name="스티키해제", description="채널의 고정 메시지를 해제합니다.")
 async def cmd_sticky_remove(itx: discord.Interaction):
-    if not is_admin(itx): return await deny(itx)
+    if not is_admin(itx):
+        return await deny(itx)
     existing = get_sticky(itx.channel.id)
     if not existing:
         return await itx.response.send_message(embed=warn_embed("스티키 없음"), ephemeral=True)
     try:
         old = await itx.channel.fetch_message(existing[1])
         await old.delete()
-    except Exception: pass
+    except Exception:
+        pass
     del_sticky(itx.channel.id)
     await itx.response.send_message(embed=success_embed("스티키 해제 완료"), ephemeral=True)
 
 # ============================================================
 # ================  PREFIX COMMANDS (!)  =====================
 # ============================================================
-
 @bot.command(name="레벨", aliases=["lv", "level"])
 async def pfx_level(ctx: commands.Context, 유저: discord.Member = None):
     user = 유저 or ctx.author
@@ -677,11 +731,11 @@ async def pfx_level(ctx: commands.Context, 유저: discord.Member = None):
     bar = "█" * filled + "░" * (20 - filled)
     e = discord.Embed(title="⭐ 레벨 정보", color=0xF1C40F, timestamp=datetime.datetime.utcnow())
     e.set_thumbnail(url=user.display_avatar.url)
-    e.add_field(name="유저",     value=user.mention)
-    e.add_field(name="레벨",     value=f"**{lv}**")
+    e.add_field(name="유저", value=user.mention)
+    e.add_field(name="레벨", value=f"**{lv}**")
     e.add_field(name="서버 순위", value=f"**#{rank}**")
-    e.add_field(name="경험치",   value=f"`{xp:,}` / `{needed:,}`")
-    e.add_field(name="진행도",   value=f"`{bar}` {int(xp/needed*100)}%", inline=False)
+    e.add_field(name="경험치", value=f"`{xp:,}` / `{needed:,}`")
+    e.add_field(name="진행도", value=f"`{bar}` {int(xp/needed*100)}%", inline=False)
     e.set_footer(text=f"{ctx.guild.name} 레벨 시스템")
     await ctx.send(embed=e)
 
@@ -708,9 +762,12 @@ async def pfx_bal(ctx: commands.Context, 유저: discord.Member = None):
 
 @bot.command(name="송금", aliases=["pay"])
 async def pfx_pay(ctx: commands.Context, 유저: discord.Member, 금액: int):
-    if 금액 <= 0: return await ctx.send(embed=error_embed("잘못된 금액"))
-    if money(ctx.author.id) < 금액: return await ctx.send(embed=error_embed("잔액 부족"))
-    sub_money(ctx.author.id, 금액); add_money(유저.id, 금액)
+    if 금액 <= 0:
+        return await ctx.send(embed=error_embed("잘못된 금액"))
+    if money(ctx.author.id) < 금액:
+        return await ctx.send(embed=error_embed("잔액 부족"))
+    sub_money(ctx.author.id, 금액)
+    add_money(유저.id, 금액)
     e = discord.Embed(title="💸 송금 완료", color=0x57F287, timestamp=datetime.datetime.utcnow())
     e.add_field(name="보낸 사람", value=ctx.author.mention, inline=True)
     e.add_field(name="받은 사람", value=유저.mention, inline=True)
@@ -725,25 +782,24 @@ async def pfx_warn(ctx: commands.Context, 유저: discord.Member):
     e = discord.Embed(title="⚠️ 경고 부여", color=0xFEE75C, timestamp=datetime.datetime.utcnow())
     e.add_field(name="대상", value=유저.mention, inline=True)
     e.add_field(name="누적 경고", value=f"**{c}회**", inline=True)
+    e.add_field(name="처벌", value=f"**{warn_punishment_text(c)}**", inline=False)
     e.set_thumbnail(url=유저.display_avatar.url)
     await ctx.send(embed=e)
     await send_log(ctx.guild, [e])
-    try:
-        if c == 3:
-            until = discord.utils.utcnow() + datetime.timedelta(hours=1)
-            await 유저.timeout(until, reason="경고 3회 — 타임아웃")
-        elif c == 5:
-            await 유저.kick(reason="경고 5회 — 킥")
-        elif c >= 7:
-            await 유저.ban(reason="경고 7회 — 밴")
-    except Exception: pass
+    await apply_warn_punishment(유저, c)
 
 @bot.command(name="경고삭제", aliases=["clearwarn"])
-async def pfx_warn_clear(ctx: commands.Context, 유저: discord.Member):
+async def pfx_warn_clear(ctx: commands.Context, 유저: discord.User):
     if not is_admin_ctx(ctx):
         return await ctx.send(embed=error_embed("권한 없음"))
     clear_warn(유저.id)
-    await ctx.send(embed=success_embed("경고 초기화", f"{유저.mention} 경고 초기화 완료"))
+    await remove_warn_punishment(ctx.guild, 유저)
+    await ctx.send(embed=success_embed("경고 초기화", f"{유저.mention} 경고 초기화 및 처벌 해제 완료"))
+
+@bot.command(name="경고확인", aliases=["warncheck", "warnings"])
+async def pfx_warn_check(ctx: commands.Context, 유저: discord.User = None):
+    user = 유저 or ctx.author
+    await ctx.send(embed=warn_check_embed(user))
 
 @bot.command(name="청소", aliases=["purge", "clear"])
 async def pfx_purge(ctx: commands.Context, 개수: int):
@@ -753,7 +809,8 @@ async def pfx_purge(ctx: commands.Context, 개수: int):
         return await ctx.send(embed=error_embed("잘못된 입력", "1~100 사이 숫자를 입력하세요."))
     deleted = await ctx.channel.purge(limit=개수 + 1)
     notice = await ctx.send(embed=success_embed("청소 완료", f"**{len(deleted)-1}개** 삭제 완료"))
-    await asyncio.sleep(5); await notice.delete()
+    await asyncio.sleep(5)
+    await notice.delete()
     log_e = discord.Embed(title="🧹 청소 로그", color=0x57F287, timestamp=datetime.datetime.utcnow())
     log_e.add_field(name="채널", value=ctx.channel.mention)
     log_e.add_field(name="삭제 수", value=f"**{len(deleted)-1}개**")
@@ -762,15 +819,17 @@ async def pfx_purge(ctx: commands.Context, 개수: int):
 
 @bot.command(name="도움말", aliases=["h", "명령어"])
 async def pfx_help(ctx: commands.Context):
-    e = discord.Embed(title="📖 명령어 도움말",
+    e = discord.Embed(
+        title="📖 명령어 도움말",
         description="슬래시(`/`) 및 접두사(`!`) 명령어 모두 지원합니다.",
-        color=0x5865F2, timestamp=datetime.datetime.utcnow())
-    e.add_field(name="⭐ 레벨",     value="`/레벨 [유저]`  `!레벨`\n`/순위`  `!순위`", inline=False)
-    e.add_field(name="💰 경제",     value="`/잔액 [유저]`  `!잔액`\n`/송금 @유저 금액`  `!송금`", inline=False)
-    e.add_field(name="⚠️ 경고",     value="`/경고 @유저`  `!경고`\n`/경고삭제 @유저`  `!경고삭제`", inline=False)
-    e.add_field(name="🧹 청소",     value="`/청소 개수`  `!청소 개수`", inline=False)
-    e.add_field(name="📌 스티키",   value="`/스티키 내용`  `/스티키해제`", inline=False)
-    e.add_field(name="🎮 파티",     value="`/파티생성`  `/파티삭제`", inline=False)
+        color=0x5865F2, timestamp=datetime.datetime.utcnow()
+    )
+    e.add_field(name="⭐ 레벨", value="`/레벨 [유저]`  `!레벨`\n`/순위`  `!순위`", inline=False)
+    e.add_field(name="💰 경제", value="`/잔액 [유저]`  `!잔액`\n`/송금 @유저 금액`  `!송금`", inline=False)
+    e.add_field(name="⚠️ 경고", value="`/경고 @유저`  `!경고`\n`/경고삭제 @유저`  `!경고삭제`\n`/경고확인 [유저]`  `!경고확인`", inline=False)
+    e.add_field(name="🧹 청소", value="`/청소 개수`  `!청소 개수`", inline=False)
+    e.add_field(name="📌 스티키", value="`/스티키 내용`  `/스티키해제`", inline=False)
+    e.add_field(name="🎮 파티", value="`/파티생성`  `/파티삭제`", inline=False)
     e.add_field(name="⚙️ 설정 (관리자)", value="`/역할`  `/채널설정`\n`/인증패널`  `/티켓패널`  `/관리자패널`", inline=False)
     e.set_footer(text=ctx.guild.name, icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
     await ctx.send(embed=e)
@@ -778,36 +837,36 @@ async def pfx_help(ctx: commands.Context):
 # ============================================================
 # ===================  GLOBAL EVENTS  =======================
 # ============================================================
-
 @bot.event
 async def on_message(message: discord.Message):
-    if message.author.bot: return
+    if message.author.bot:
+        return
     await bot.process_commands(message)
-    if not message.guild: return
-
-    # 채팅 XP
+    if not message.guild:
+        return
     await process_chat_xp(message)
-
-    # 스티키 처리
     sticky = get_sticky(message.channel.id)
-    if not sticky: return
+    if not sticky:
+        return
     content, old_id = sticky
     try:
         old_msg = await message.channel.fetch_message(old_id)
         await old_msg.delete()
-    except Exception: pass
+    except Exception:
+        pass
     se = discord.Embed(title="📌 고정 메시지", description=content, color=0xF1C40F, timestamp=datetime.datetime.utcnow())
     se.set_footer(text="📌 이 메시지는 채널 하단에 고정됩니다.")
     new_msg = await message.channel.send(embed=se)
     set_sticky(message.channel.id, message.guild.id, content, new_msg.id)
 
-
 @bot.event
 async def on_member_join(member: discord.Member):
     cfg = get_cfg(member.guild.id)
-    if not cfg["welcome_ch"]: return
+    if not cfg["welcome_ch"]:
+        return
     ch = member.guild.get_channel(cfg["welcome_ch"])
-    if not ch: return
+    if not ch:
+        return
     e = discord.Embed(
         title="👋 새로운 멤버 입장!",
         description=(
@@ -821,13 +880,14 @@ async def on_member_join(member: discord.Member):
     e.set_footer(text=f"현재 멤버 수: {member.guild.member_count}명")
     await ch.send(embed=e)
 
-
 @bot.event
 async def on_member_remove(member: discord.Member):
     cfg = get_cfg(member.guild.id)
-    if not cfg["log_ch"]: return
+    if not cfg["log_ch"]:
+        return
     ch = member.guild.get_channel(cfg["log_ch"])
-    if not ch: return
+    if not ch:
+        return
     e = discord.Embed(
         title="👋 멤버 퇴장",
         description=f"**{member}** 님이 서버를 떠났습니다.",
@@ -837,22 +897,22 @@ async def on_member_remove(member: discord.Member):
     e.set_footer(text=f"현재 멤버 수: {member.guild.member_count}명")
     await ch.send(embed=e)
 
-
 @bot.event
 async def on_ready():
     init_db()
-    # Persistent View 등록 (봇 재시작 후 버튼 유지)
     for view in [VerifyView(), TicketView(), TicketCloseView(), PartyView(), AdminPanel()]:
         bot.add_view(view)
-    await bot.tree.sync()
+    synced = await bot.tree.sync()
     await bot.change_presence(
         activity=discord.Activity(type=discord.ActivityType.watching, name="서버 관리 중 👀")
     )
     print(f"🔥 QUABOT READY | {bot.user} ({bot.user.id})")
-
+    print(f"✅ Slash commands synced: {len(synced)}")
 
 # ================== RUN ==================
 def start():
+    if not TOKEN:
+        raise RuntimeError("TOKEN 환경변수가 설정되지 않았습니다.")
     keep_alive()
     bot.run(TOKEN)
 
