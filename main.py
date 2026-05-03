@@ -107,7 +107,7 @@ def command_list_embed(guild: discord.Guild):
     )
     e.add_field(
         name="⚙️ 설정/패널",
-        value=(
+        value        value=(
             "`/역할` `!역할 @인증역할 @관리자역할`
 "
             "`/채널설정` `!채널설정 #채널 #로그 #레벨업 카테고리`
