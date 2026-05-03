@@ -1034,6 +1034,94 @@ async def pfx_sticky_remove(ctx: commands.Context):
     del_sticky(ctx.channel.id)
     await ctx.send(embed=success_embed("스티키 해제 완료"))
 
+# ================== STICKY VIEW (버튼 상호작용) ==================
+class StickyView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)  # 영구 버튼
+
+    @discord.ui.button(label="새로고침", emoji="🔄", style=discord.ButtonStyle.gray)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.followup.send("✅ Sticky 메시지가 새로고침되었습니다.", ephemeral=True)
+
+    @discord.ui.button(label="Sticky 삭제", emoji="🗑️", style=discord.ButtonStyle.red)
+    async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not has_admin_role(interaction):
+            await interaction.response.send_message("❌ 관리자만 삭제할 수 있습니다.", ephemeral=True)
+            return
+        del_sticky(interaction.channel.id)
+        await interaction.message.delete()
+        await interaction.response.send_message("🗑️ Sticky 메시지가 삭제되었습니다.", ephemeral=True)
+
+
+# ================== STICKY FUNCTIONS (기존 함수 개선) ==================
+def get_sticky(channel_id):
+    cur.execute("SELECT content, message_id FROM sticky WHERE channel_id=?", (channel_id,))
+    r = cur.fetchone()
+    return r if r else None
+
+def set_sticky(channel_id, guild_id, content, message_id):
+    cur.execute(
+        """INSERT INTO sticky VALUES (?,?,?,?)
+           ON CONFLICT(channel_id) DO UPDATE SET
+           content=excluded.content, message_id=excluded.message_id""",
+        (channel_id, guild_id, content, message_id)
+    )
+    conn.commit()
+
+def del_sticky(channel_id):
+    cur.execute("DELETE FROM sticky WHERE channel_id=?", (channel_id,))
+    conn.commit()
+
+# ================== STICKY 명령어 (일반 텍스트 + 버튼) ==================
+@bot.tree.command(name="sticky", description="채널에 일반 텍스트 Sticky 메시지를 설정합니다.")
+@app_commands.describe(content="고정할 메시지 내용")
+async def sticky_slash(interaction: discord.Interaction, content: str):
+    if not has_admin_role(interaction):
+        return await interaction.response.send_message(
+            embed=error_embed("권한 없음", "관리자만 사용할 수 있습니다."), ephemeral=True)
+
+    await interaction.response.defer(ephemeral=True)
+
+    # 기존 Sticky 삭제
+    old = get_sticky(interaction.channel.id)
+    if old and old[1]:
+        try:
+            old_msg = await interaction.channel.fetch_message(old[1])
+            await old_msg.delete()
+        except:
+            pass
+
+    # 일반 텍스트로 Sticky 전송
+    full_text = f"{content}\n\n📌 **Sticky Message**"
+    msg = await interaction.channel.send(full_text, view=StickyView())
+
+    set_sticky(interaction.channel.id, interaction.guild.id, content, msg.id)
+    await interaction.followup.send("✅ Sticky 메시지가 설정되었습니다.", ephemeral=True)
+
+
+@bot.command(name="sticky")
+async def sticky_text(ctx, *, content: str = None):
+    if not content:
+        return await ctx.send("❌ 사용법: `!sticky 내용`", delete_after=10)
+
+    if not has_admin_role(ctx):
+        return await ctx.send(embed=error_embed("권한 없음", "관리자만 사용할 수 있습니다."))
+
+    # 기존 Sticky 삭제
+    old = get_sticky(ctx.channel.id)
+    if old and old[1]:
+        try:
+            old_msg = await ctx.channel.fetch_message(old[1])
+            await old_msg.delete()
+        except:
+            pass
+
+    full_text = f"{content}\n\n📌 **Sticky Message**"
+    msg = await ctx.send(full_text, view=StickyView())
+
+    set_sticky(ctx.channel.id, ctx.guild.id, content, msg.id)
+    await ctx.send("✅ Sticky 메시지가 설정되었습니다!", delete_after=5)
 # ============================================================
 # ======================  EVENTS  ============================
 # ============================================================
